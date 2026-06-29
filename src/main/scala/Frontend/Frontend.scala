@@ -16,9 +16,9 @@ class FrontendBackendIO extends Bundle {
     val gprWen = Input(Vec(8, Bool()))      // 8个GPR写口
     val gprWaddr = Input(Vec(8, UInt(5.W)))
     val gprWdata = Input(Vec(8, UInt(32.W)))
-    val fprWen = Input(Vec(3, Bool()))
-    val fprWaddr = Input(Vec(3, UInt(5.W)))
-    val fprWdata = Input(Vec(3, UInt(32.W)))
+    val fprWen = Input(Vec(5, Bool()))
+    val fprWaddr = Input(Vec(5, UInt(5.W)))
+    val fprWdata = Input(Vec(5, UInt(32.W)))
 }
 
 // 前端与Hazard接口
@@ -100,7 +100,7 @@ class Frontend extends Module {
     
     // 寄存器堆：GPR 14读8写，FPR 9读3写
     val grf = Module(new Regfile(nr = 14, nw = 8))
-    val frf = Module(new Regfile(nr = 9, nw = 3))
+    val frf = Module(new Regfile(nr = 9, nw = 5))
     
     // ========== 寄存器堆读端口连接 ==========
     // 根据文档表格，连接读端口
@@ -132,7 +132,7 @@ class Frontend extends Module {
         grf.io.wdata(i) := io.backend.gprWdata(i)
     }
     
-    for (i <- 0 until 3) {
+    for (i <- 0 until 5) {
         frf.io.wen(i) := io.backend.fprWen(i)
         frf.io.waddr(i) := io.backend.fprWaddr(i)
         frf.io.wdata(i) := io.backend.fprWdata(i)

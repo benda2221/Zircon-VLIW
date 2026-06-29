@@ -1,4 +1,4 @@
 [submodule "ZirconSim"]
 	path = ZirconSim
-	url = https://github.com/MAdrid1011/ZirconSim.git
+	url = git@github.com:MAdrid1011/ZirconSim.git
 	branch = VLIW

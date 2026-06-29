@@ -43,44 +43,57 @@ class ALUFPUPipeline(val convertType: Int = 0) extends Module {
     fpuConvert.io.rs1Data := ex1Rs1Data
     fpuConvert.io.op := ex1Pkg.op
     fpuConvert.io.rm := ex1Pkg.rm
+
+    val ex1ConvertRes = fpuConvert.io.res
+    val ex1ConvertFlags = fpuConvert.io.fflags
     
     // EX1阶段更新InstPkg
     val ex1PkgOut = ex1Pkg.EX1Update(alu.io.res, 0.U, false.B)
     
     // ========== EX2阶段 ==========
     val ex2Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
+    val ex2ConvertRes = RegInit(0.U(32.W))
+    val ex2ConvertFlags = RegInit(0.U(5.W))
     when(io.hazard.ex2Flush) {
         ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
+        ex2ConvertRes := 0.U
+        ex2ConvertFlags := 0.U
     }.elsewhen(!io.hazard.ex2Stall) {
         ex2Pkg := ex1PkgOut
+        ex2ConvertRes := ex1ConvertRes
+        ex2ConvertFlags := ex1ConvertFlags
     }
     
     // ========== EX3阶段 ==========
     val ex3Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
+    val ex3ConvertRes = RegInit(0.U(32.W))
+    val ex3ConvertFlags = RegInit(0.U(5.W))
     when(io.hazard.ex3Flush) {
         ex3Pkg := 0.U.asTypeOf(new InstructionPackage)
+        ex3ConvertRes := 0.U
+        ex3ConvertFlags := 0.U
     }.elsewhen(!io.hazard.ex3Stall) {
-        // EX3阶段：选择 FPU 或类型转换结果
-        // 保存 EX2 阶段的 isConvert 判断结果
-        val ex2IsConvert = if (convertType == 1) {
-            ex2Pkg.op === ZirconConfig.EXEOp.FCVT_W_S || 
-            ex2Pkg.op === ZirconConfig.EXEOp.FCVT_WU_S
-        } else {
-            ex2Pkg.op === ZirconConfig.EXEOp.FCVT_S_W || 
-            ex2Pkg.op === ZirconConfig.EXEOp.FCVT_S_WU
-        }
-        
-        val fpuRes = Mux(ex2IsConvert, fpuConvert.io.res, fpu.io.res)
-        val fpuFlags = Mux(ex2IsConvert, fpuConvert.io.fflags, fpu.io.fflags)
-        ex3Pkg := ex2Pkg.EX3Update(fpuRes, fpuFlags)
+        ex3Pkg := ex2Pkg
+        ex3ConvertRes := ex2ConvertRes
+        ex3ConvertFlags := ex2ConvertFlags
     }
     
     // ========== WB阶段 ==========
     val wbPkg = RegInit(0.U.asTypeOf(new InstructionPackage))
+    val ex3IsConvert = if (convertType == 1) {
+        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_W_S ||
+        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_WU_S
+    } else {
+        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_S_W ||
+        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_S_WU
+    }
+    val wbFpuRes = Mux(ex3IsConvert, ex3ConvertRes, fpu.io.res)
+    val wbFpuFlags = Mux(ex3IsConvert, ex3ConvertFlags, fpu.io.fflags)
+    val ex3PkgWithFpu = ex3Pkg.EX3Update(wbFpuRes, wbFpuFlags)
     when(io.hazard.wbFlush) {
         wbPkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.wbStall) {
-        wbPkg := ex3Pkg
+        wbPkg := ex3PkgWithFpu
     }
     
     // WB阶段：选择写回数据（FPU指令用fpuResult，ALU指令用aluResult）

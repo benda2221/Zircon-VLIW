@@ -112,20 +112,35 @@ class FPU extends Module {
     ))
     
     // ========== 输出选择 ==========
-    io.res := MuxCase(defaultRes, Seq(
-        (io.op === FADD_S || io.op === FSUB_S) -> fadd.io.result,
-        (io.op === FMUL_S) -> fmul.io.result,
+    // FADD has one internal register, FMUL has two.  Other operations are
+    // combinational here, so delay them to the common EX3 result point.
+    val opD2 = ShiftRegister(io.op, 2, 0.U(7.W), true.B)
+    val faddResD2 = ShiftRegister(fadd.io.result, 1, 0.U(32.W), true.B)
+    val faddFlagsD2 = ShiftRegister(fadd.io.fflags, 1, 0.U(5.W), true.B)
+    val combResD2 = ShiftRegister(MuxCase(defaultRes, Seq(
         (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp_res,
         (io.op === FSGNJ_S || io.op === FSGNJN_S || io.op === FSGNJX_S) -> fsgnj_res,
         (io.op === FMIN_S || io.op === FMAX_S) -> fmin_max_res,
         (io.op === FCLASS_S) -> fclass_res,
         (io.op === FMV_X_W || io.op === FMV_W_X) -> fmv_res
+    )), 2, 0.U(32.W), true.B)
+    val combFlagsD2 = ShiftRegister(MuxCase(defaultFflags, Seq(
+        (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp.io.fflags
+    )), 2, 0.U(5.W), true.B)
+
+    io.res := MuxCase(defaultRes, Seq(
+        (opD2 === FADD_S || opD2 === FSUB_S) -> faddResD2,
+        (opD2 === FMUL_S) -> fmul.io.result,
+        (opD2 === FEQ_S || opD2 === FLT_S || opD2 === FLE_S ||
+         opD2 === FSGNJ_S || opD2 === FSGNJN_S || opD2 === FSGNJX_S ||
+         opD2 === FMIN_S || opD2 === FMAX_S || opD2 === FCLASS_S ||
+         opD2 === FMV_X_W || opD2 === FMV_W_X) -> combResD2
     ))
     
     io.fflags := MuxCase(defaultFflags, Seq(
-        (io.op === FADD_S || io.op === FSUB_S) -> fadd.io.fflags,
-        (io.op === FMUL_S) -> fmul.io.fflags,
-        (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp.io.fflags
+        (opD2 === FADD_S || opD2 === FSUB_S) -> faddFlagsD2,
+        (opD2 === FMUL_S) -> fmul.io.fflags,
+        (opD2 === FEQ_S || opD2 === FLT_S || opD2 === FLE_S) -> combFlagsD2
     ))
 }
 
