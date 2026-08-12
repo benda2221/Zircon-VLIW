@@ -8,8 +8,12 @@ class BranchIO extends Bundle{
     val op         = Input(UInt(7.W))
     val pc         = Input(UInt(32.W))
     val imm        = Input(UInt(32.W))
+    val predTaken  = Input(Bool())
+    val predTarget = Input(UInt(32.W))
     val predFail   = Output(Bool())
     val branchTgt  = Output(UInt(32.W))
+    val actualTaken = Output(Bool())
+    val actualTarget = Output(UInt(32.W))
 }
 
 class Branch extends Module{
@@ -18,7 +22,7 @@ class Branch extends Module{
     val realJp         = WireDefault(false.B)
     val tgtAdderSrc1   = WireDefault(io.pc)
     val tgtAdderSrc2   = WireDefault(io.imm)
-    val branchTgt      = BLevelPAdder32(tgtAdderSrc1, tgtAdderSrc2, 0.U).io.res
+    val calculatedTarget = BLevelPAdder32(tgtAdderSrc1, tgtAdderSrc2, 0.U).io.res
     val cmpSrc1        = WireDefault(io.src1)
     val cmpSrc2        = WireDefault(io.src2)  
     val cmpAdder       = BLevelPAdder32(cmpSrc1, ~cmpSrc2, 1.U)
@@ -34,7 +38,12 @@ class Branch extends Module{
         is(JALR){ realJp := true.B; tgtAdderSrc1 := io.src1 }
     }
     
-    // 静态预测：如果需要跳转就认为predFail
-    io.predFail    := realJp
-    io.branchTgt   := branchTgt
+    val actualTarget = Mux(io.op === JALR, calculatedTarget & "hfffffffe".U, calculatedTarget)
+    val directionMiss = io.predTaken =/= realJp
+    val targetMiss = io.predTaken && realJp && io.predTarget =/= actualTarget
+
+    io.actualTaken := realJp
+    io.actualTarget := actualTarget
+    io.predFail := directionMiss || targetMiss
+    io.branchTgt := Mux(realJp, actualTarget, io.pc + 4.U)
 }

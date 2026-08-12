@@ -6,6 +6,8 @@ class InstructionPackage extends Bundle {
     /* IF Stage */
     val pc        = UInt(32.W)
     val inst      = UInt(32.W)
+    val predTaken = Bool()
+    val predTarget = UInt(32.W)
     /* ID Stage */
     // regfile
     val rs1       = UInt(6.W) // the highest bit to judge if it is float
@@ -28,14 +30,18 @@ class InstructionPackage extends Bundle {
     val fflags    = UInt(5.W) // floating-point status flags (NV, DZ, OF, UF, NX)
     val branchTgt = UInt(32.W)
     val predFail  = Bool()
+    val branchTaken = Bool()
+    val actualBranchTarget = UInt(32.W)
     val memResult = UInt(32.W)
     /* WB Stage */
     val rfWdata   = UInt(32.W)
 
-    def IFUpdate(pc: UInt, inst: UInt): InstructionPackage = {
+    def IFUpdate(pc: UInt, inst: UInt, predTaken: Bool = false.B, predTarget: UInt = 0.U): InstructionPackage = {
         val instPkg = WireDefault(this)
         instPkg.pc     := pc
         instPkg.inst   := inst
+        instPkg.predTaken := predTaken
+        instPkg.predTarget := predTarget
         instPkg
     }
     def IDUpdate(rs1: UInt, rs2: UInt, rs3: UInt, rd: UInt, rdValid: Bool, op: UInt, rm: UInt, imm: UInt, src1Sel: UInt, src2Sel: UInt): InstructionPackage = {
@@ -59,11 +65,19 @@ class InstructionPackage extends Bundle {
         instPkg.rs3Data   := rs3Data
         instPkg
     }
-    def EX1Update(aluResult: UInt, branchTgt: UInt, predFail: Bool): InstructionPackage = {
+    def EX1Update(
+        aluResult: UInt,
+        branchTgt: UInt,
+        predFail: Bool,
+        branchTaken: Bool = false.B,
+        actualBranchTarget: UInt = 0.U
+    ): InstructionPackage = {
         val instPkg = WireDefault(this)
         instPkg.aluResult := aluResult
         instPkg.branchTgt := branchTgt
         instPkg.predFail  := predFail
+        instPkg.branchTaken := branchTaken
+        instPkg.actualBranchTarget := actualBranchTarget
         instPkg
     }
     def EX2Update(memResult: UInt): InstructionPackage = {

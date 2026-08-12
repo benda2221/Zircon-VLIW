@@ -86,6 +86,11 @@ class CPU extends Module {
     // Backend -> Frontend: 分支重定向
     frontend.io.backend.predFail := backend.io.frontend.predFail
     frontend.io.backend.branchTgt := backend.io.frontend.branchTgt
+    frontend.io.backend.branchUpdateValid := backend.io.frontend.branchUpdateValid
+    frontend.io.backend.branchUpdatePC := backend.io.frontend.branchUpdatePC
+    frontend.io.backend.branchUpdateInst := backend.io.frontend.branchUpdateInst
+    frontend.io.backend.branchUpdateTaken := backend.io.frontend.branchUpdateTaken
+    frontend.io.backend.branchUpdateTarget := backend.io.frontend.branchUpdateTarget
     
     // ========== 连接Frontend和Hazard ==========
     frontend.io.hazard <> hazard.io.frontend

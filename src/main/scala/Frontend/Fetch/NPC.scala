@@ -7,6 +7,8 @@ class NPCBackendIO extends Bundle {
 }
 class NPCFetchIO extends Bundle {
     val pc         = Input(UInt(32.W))
+    val predTaken  = Input(Bool())
+    val predTarget = Input(UInt(32.W))
     val npc        = Output(UInt(32.W))
 }
 class NPCIO extends Bundle {
@@ -20,6 +22,8 @@ class NPC extends Module {
         npc := io.backend.branchTgt
     }.elsewhen(io.backend.stall){
         npc := io.fetch.pc
+    }.elsewhen(io.fetch.predTaken){
+        npc := io.fetch.predTarget
     }.otherwise{
         npc := io.fetch.pc + 32.U  // 8条指令，每条4字节，所以是+32
     }

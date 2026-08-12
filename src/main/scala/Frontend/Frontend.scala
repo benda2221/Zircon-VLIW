@@ -12,6 +12,11 @@ class FrontendBackendIO extends Bundle {
     val instPkg = Output(Vec(8, new InstructionPackage))  // 8个指令包输出
     val branchTgt = Input(UInt(32.W))  // 分支重定向目标地址
     val predFail = Input(Bool())  // 分支预测失败信号
+    val branchUpdateValid = Input(Bool())
+    val branchUpdatePC = Input(UInt(32.W))
+    val branchUpdateInst = Input(UInt(32.W))
+    val branchUpdateTaken = Input(Bool())
+    val branchUpdateTarget = Input(UInt(32.W))
     // 写回接口
     val gprWen = Input(Vec(8, Bool()))      // 8个GPR写口
     val gprWaddr = Input(Vec(8, UInt(5.W)))
@@ -60,6 +65,15 @@ class Frontend extends Module {
     // ========== IF Stage ==========
     // PC寄存器（复位值0x80000000）
     val pc = RegInit(0x80000000L.U(32.W))
+
+    val branchPredictor = Module(new BranchPredictor)
+    branchPredictor.io.lookup.packetPC := pc
+    branchPredictor.io.lookup.slot7Inst := io.mem.insts(7)
+    branchPredictor.io.update.valid := io.backend.branchUpdateValid
+    branchPredictor.io.update.pc := io.backend.branchUpdatePC
+    branchPredictor.io.update.inst := io.backend.branchUpdateInst
+    branchPredictor.io.update.taken := io.backend.branchUpdateTaken
+    branchPredictor.io.update.target := io.backend.branchUpdateTarget
     
     // NPC模块
     val npc = Module(new NPC)
@@ -67,6 +81,8 @@ class Frontend extends Module {
     npc.io.backend.branchTgt := io.backend.branchTgt
     npc.io.backend.predFail := io.backend.predFail
     npc.io.backend.stall := io.hazard.stall
+    npc.io.fetch.predTaken := branchPredictor.io.lookup.taken
+    npc.io.fetch.predTarget := branchPredictor.io.lookup.target
     
     // 更新PC
     when(!io.hazard.stall) {
@@ -79,7 +95,14 @@ class Frontend extends Module {
     // IF段的8个InstructionPackage
     val ifInstPkgs = Wire(Vec(8, new InstructionPackage))
     for (i <- 0 until 8) {
-        ifInstPkgs(i) := WireDefault(0.U.asTypeOf(new InstructionPackage)).IFUpdate(pc + (i * 4).U, io.mem.insts(i))
+        val predTaken = if (i == 7) branchPredictor.io.lookup.taken else false.B
+        val predTarget = if (i == 7) branchPredictor.io.lookup.target else 0.U
+        ifInstPkgs(i) := WireDefault(0.U.asTypeOf(new InstructionPackage)).IFUpdate(
+            pc + (i * 4).U,
+            io.mem.insts(i),
+            predTaken,
+            predTarget
+        )
     }
     
     // ========== IF-ID 段间寄存器 ==========
