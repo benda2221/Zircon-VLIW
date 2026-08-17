@@ -123,18 +123,26 @@ class SRT2 extends Module {
     val quotientS3  = BLevelPAdder32(adder.io.res, Mux(rmdReg(64), 0xFFFFFFFFL.U(32.W), 0.U), 0.U).io.res
     val remainderS3 = BLevelPAdder32(rmdReg(63, 32), Mux(rmdReg(64), divReg, 0.U), 0.U).io.res >> src2LeadingZerosS3
 
+    // The output-valid pulse was already delayed by one cycle. Use that cycle
+    // to register remainder recovery before the final sign correction.
+    val quotientRecovered = RegEnable(quotientS3, 0.U(32.W), readyS3)
+    val remainderRecovered = RegEnable(remainderS3, 0.U(32.W), readyS3)
+    val resultSignRecovered = RegEnable(resSignS3, false.B, readyS3)
+    val dividendRecovered = RegEnable(src1S3, 0.U(32.W), readyS3)
+    val opRecovered = RegEnable(opS3, 0.U(5.W), readyS3)
+    val divisorIsZeroRecovered = RegEnable(divS3IsZero, false.B, readyS3)
 
     val resultAdder = Module(new BLevelPAdder32)
     // for div, if the divisor is 0, the result is 0xffffffff according to the RISC-V spec
     // for rem, if the divisor is 0, the result is the divident
     resultAdder.io.src1  := Mux1H(Seq(
-        (opS3 === DIV,  Mux(divS3IsZero, 0xffffffffL.U, Mux(resSignS3, ~quotientS3, quotientS3))),
-        (opS3 === DIVU, Mux(divS3IsZero, 0xffffffffL.U, quotientS3)),
-        (opS3 === REM,  Mux(divS3IsZero, src1S3, Mux(resSignS3, ~remainderS3, remainderS3))),
-        (opS3 === REMU, Mux(divS3IsZero, src1S3, remainderS3))
+        (opRecovered === DIV,  Mux(divisorIsZeroRecovered, 0xffffffffL.U, Mux(resultSignRecovered, ~quotientRecovered, quotientRecovered))),
+        (opRecovered === DIVU, Mux(divisorIsZeroRecovered, 0xffffffffL.U, quotientRecovered)),
+        (opRecovered === REM,  Mux(divisorIsZeroRecovered, dividendRecovered, Mux(resultSignRecovered, ~remainderRecovered, remainderRecovered))),
+        (opRecovered === REMU, Mux(divisorIsZeroRecovered, dividendRecovered, remainderRecovered))
     ))
     resultAdder.io.src2 := 0.U
-    resultAdder.io.cin  := !opS3(0) && resSignS3 && !divS3IsZero
+    resultAdder.io.cin  := !opRecovered(0) && resultSignRecovered && !divisorIsZeroRecovered
     io.res              := resultAdder.io.res
     io.ready            := readyReg
 

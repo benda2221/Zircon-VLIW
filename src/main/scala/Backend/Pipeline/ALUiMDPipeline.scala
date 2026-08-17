@@ -112,6 +112,11 @@ class ALUiMDPipeline extends Module {
     val wbMulDivRes = Mux(wbIsDiv, ex3DivResReg, ex3MulResReg)
     val wbData = Mux(wbIsMulDiv, wbMulDivRes, wbPkg.aluResult)
     val wbPkgOut = wbPkg.WBUpdate(wbData)
+
+    // Keep the registered package independent from the combinational multiply
+    // result. Consumers that permit this path use ex3GprData explicitly.
+    val ex3IsMul = ex3Pkg.op(4) && !ex3Pkg.op(2)
+    val ex3GprData = Mux(ex3IsMul, ex3MulRes, ex3Pkg.aluResult)
     
     // 写回到寄存器堆
     io.frontend.gprWen := wbPkgOut.rdValid && !wbPkgOut.rd(5)
@@ -125,6 +130,7 @@ class ALUiMDPipeline extends Module {
     io.forward.ex1Pkg := ex1Pkg
     io.forward.ex2Pkg := ex2Pkg
     io.forward.ex3Pkg := ex3Pkg
+    io.forward.ex3GprData := ex3GprData
     io.forward.wbPkg := wbPkgOut
     io.hazard.ex1Pkg := ex1Pkg
     io.hazard.ex2Pkg := ex2Pkg

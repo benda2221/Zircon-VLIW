@@ -127,6 +127,7 @@ class ALULSUPipeline extends Module {
     io.forward.ex1Pkg := ex1Pkg
     io.forward.ex2Pkg := ex2Pkg
     io.forward.ex3Pkg := ex3Pkg
+    io.forward.ex3GprData := ex3Pkg.aluResult
     io.forward.wbPkg := wbPkgOut
     io.hazard.ex1Pkg := ex1Pkg
     io.hazard.ex2Pkg := ex2Pkg

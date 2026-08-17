@@ -6,11 +6,16 @@ class PipelineForwardIO extends Bundle {
     val ex1Pkg = Output(new InstructionPackage)  // EX1阶段
     val ex2Pkg = Output(new InstructionPackage)  // EX2阶段（用于前递）
     val ex3Pkg = Output(new InstructionPackage)  // EX3阶段（用于前递）
+    val ex3GprData = Output(UInt(32.W))           // EX3阶段实际GPR前递数据
     val wbPkg  = Output(new InstructionPackage)  // WB阶段（用于前递）
     // 接收Forward的前递数据
     val fwdRs1Data = Input(UInt(32.W))
     val fwdRs2Data = Input(UInt(32.W))
     val fwdRs3Data = Input(UInt(32.W))
+    val fwdGprRs1Data = Input(UInt(32.W))
+    val fwdGprRs2Data = Input(UInt(32.W))
+    val fwdFprRs1Data = Input(UInt(32.W))
+    val fwdFprRs2Data = Input(UInt(32.W))
 }
 
 class PipelineBackendIO extends Bundle {
@@ -64,6 +69,8 @@ class ALUBranchPipelineIO extends Bundle {
     val frontend = new PipelineFrontendIO
     val hazard = new ALUBranchPipelineHazardIO
     val csr = new ALUBranchPipelineCSRIO
+    val branchRs1Data = Input(UInt(32.W))
+    val branchRs2Data = Input(UInt(32.W))
 }
 
 class ALUBranchPipeline extends Module {
@@ -88,8 +95,8 @@ class ALUBranchPipeline extends Module {
     
     // Branch实例化
     val branch = Module(new Branch)
-    branch.io.src1 := ex1Rs1Data
-    branch.io.src2 := ex1Rs2Data
+    branch.io.src1 := io.branchRs1Data
+    branch.io.src2 := io.branchRs2Data
     branch.io.op := ex1Pkg.op
     branch.io.pc := ex1Pkg.pc
     branch.io.imm := ex1Pkg.imm
@@ -160,6 +167,7 @@ class ALUBranchPipeline extends Module {
     io.forward.ex1Pkg := ex1Pkg
     io.forward.ex2Pkg := ex2Pkg
     io.forward.ex3Pkg := ex3Pkg
+    io.forward.ex3GprData := ex3Pkg.aluResult
     io.forward.wbPkg := wbPkgOut
     io.hazard.ex1Pkg := ex1Pkg
     io.hazard.ex2Pkg := ex2Pkg

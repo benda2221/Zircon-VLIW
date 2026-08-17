@@ -3,6 +3,7 @@ import chisel3.util._
 import ZirconConfig.EXEOp._
 import ZirconConfig.FloatConfig._
 import fudian._
+import zirconfp.{FAddPipeline, FMulPipeline}
 
 /**
  * FPU包装类 - 封装fudian浮点运算模块
@@ -16,9 +17,13 @@ class FPUIO extends Bundle {
     val rs3Data = Input(UInt(32.W))    // 源操作数3（保留，本次不用）
     val op = Input(UInt(7.W))          // 操作码
     val rm = Input(UInt(3.W))          // 舍入模式
-    val faddAdvance = Input(Bool())
-    val fmulStage1Advance = Input(Bool())
-    val fmulStage2Advance = Input(Bool())
+    val inValid = Input(Bool())
+    val ex2Advance = Input(Bool())
+    val ex2Flush = Input(Bool())
+    val ex3Advance = Input(Bool())
+    val ex3Flush = Input(Bool())
+    val wbAdvance = Input(Bool())
+    val wbFlush = Input(Bool())
     val res = Output(UInt(32.W))       // 运算结果
     val fflags = Output(UInt(5.W))     // 浮点异常标志 {NV, DZ, OF, UF, NX}
     val faddResult = Output(UInt(32.W))
@@ -30,9 +35,9 @@ class FPUIO extends Bundle {
 class FPU extends Module {
     val io = IO(new FPUIO)
     
-    // 实例化fudian模块
-    val fadd = Module(new FADD(expWidth, precision))
-    val fmul = Module(new FMUL(expWidth, precision))
+    // FADD/FSUB/FMUL使用与处理器EX1-EX3/WB边界对齐的三级流水实现。
+    val fadd = Module(new FAddPipeline)
+    val fmul = Module(new FMulPipeline)
     val fcmp = Module(new FCMP(expWidth, precision))
     
     // 默认值
@@ -41,22 +46,28 @@ class FPU extends Module {
     
     // ========== 算术运算模块连接 ==========
     // FADD/FSUB
-    fadd.io.a := io.rs1Data
-    // FSUB通过翻转rs2的符号位实现
+    fadd.io.src1 := io.rs1Data
+    fadd.io.src2 := io.rs2Data
     val isFSUB = io.op === FSUB_S
-    fadd.io.b := Mux(isFSUB, 
-        Cat(~io.rs2Data(31), io.rs2Data(30, 0)),  // 翻转符号位
-        io.rs2Data
-    )
-    fadd.io.rm := io.rm
-    fadd.io.advance := io.faddAdvance
+    fadd.io.op := isFSUB
+    fadd.io.inValid := io.inValid && (io.op === FADD_S || isFSUB)
+    fadd.io.ex2Advance := io.ex2Advance
+    fadd.io.ex2Flush := io.ex2Flush
+    fadd.io.ex3Advance := io.ex3Advance
+    fadd.io.ex3Flush := io.ex3Flush
+    fadd.io.wbAdvance := io.wbAdvance
+    fadd.io.wbFlush := io.wbFlush
     
     // FMUL
-    fmul.io.a := io.rs1Data
-    fmul.io.b := io.rs2Data
-    fmul.io.rm := io.rm
-    fmul.io.stage1Advance := io.fmulStage1Advance
-    fmul.io.stage2Advance := io.fmulStage2Advance
+    fmul.io.src1 := io.rs1Data
+    fmul.io.src2 := io.rs2Data
+    fmul.io.inValid := io.inValid && io.op === FMUL_S
+    fmul.io.ex2Advance := io.ex2Advance
+    fmul.io.ex2Flush := io.ex2Flush
+    fmul.io.ex3Advance := io.ex3Advance
+    fmul.io.ex3Flush := io.ex3Flush
+    fmul.io.wbAdvance := io.wbAdvance
+    fmul.io.wbFlush := io.wbFlush
     
     // FCMP - 比较运算
     fcmp.io.a := io.rs1Data
@@ -123,8 +134,6 @@ class FPU extends Module {
     
     // ========== 输出选择 ==========
     io.res := MuxCase(defaultRes, Seq(
-        (io.op === FADD_S || io.op === FSUB_S) -> fadd.io.result,
-        (io.op === FMUL_S) -> fmul.io.result,
         (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp_res,
         (io.op === FSGNJ_S || io.op === FSGNJN_S || io.op === FSGNJX_S) -> fsgnj_res,
         (io.op === FMIN_S || io.op === FMAX_S) -> fmin_max_res,
@@ -133,16 +142,13 @@ class FPU extends Module {
     ))
     
     io.fflags := MuxCase(defaultFflags, Seq(
-        (io.op === FADD_S || io.op === FSUB_S) -> fadd.io.fflags,
-        (io.op === FMUL_S) -> fmul.io.fflags,
         (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp.io.fflags
     ))
 
     // The arithmetic units have different internal latencies. Pipelines use
     // these unselected outputs to align each result with its instruction.
     io.faddResult := fadd.io.result
-    io.faddFflags := fadd.io.fflags
+    io.faddFflags := 0.U
     io.fmulResult := fmul.io.result
-    io.fmulFflags := fmul.io.fflags
+    io.fmulFflags := 0.U
 }
-

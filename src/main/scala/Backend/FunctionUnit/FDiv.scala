@@ -1,11 +1,10 @@
 import chisel3._
 import chisel3.util._
 import ZirconConfig.EXEOp._
-import ZirconConfig.FloatConfig._
-import fudian._
+import zirconfp.{FDiv, FSqrt}
 
 /**
- * FDivWrapper包装类 - 封装fudian的FDIV模块
+ * FDivWrapper包装类 - 封装独立的FDiv和FSqrt模块
  * 支持: FDIV.S, FSQRT.S
  * 特点: 使用握手协议，计算周期不固定
  */
@@ -24,28 +23,36 @@ class FDivWrapperIO extends Bundle {
 
 class FDivWrapper extends Module {
     val io = IO(new FDivWrapperIO)
-    
-    // 实例化fudian的FDIV模块
-    val fdiv = Module(new FDIV(expWidth, precision))
-    
-    // 判断是否是 FSQRT
-    val isSqrt = io.op === FSQRT_S
-    
-    // 连接输入
-    fdiv.io.a := io.rs1Data
-    fdiv.io.b := io.rs2Data
+
+    val fdiv = Module(new FDiv)
+    val fsqrt = Module(new FSqrt)
+
+    val requestIsSqrt = io.op === FSQRT_S
+    val activeIsSqrt = RegInit(false.B)
+    val unitBusy = fdiv.io.busy || fsqrt.io.busy
+    val selectedReady = Mux(requestIsSqrt, fsqrt.io.inReady, fdiv.io.inReady)
+    val requestFire = io.valid && !unitBusy && selectedReady
+
+    when(requestFire) {
+        activeIsSqrt := requestIsSqrt
+    }
+
+    fdiv.io.src1 := io.rs1Data
+    fdiv.io.src2 := io.rs2Data
     fdiv.io.rm := io.rm
-    
-    // 握手信号
-    fdiv.io.specialIO.isSqrt := isSqrt
-    fdiv.io.specialIO.in_valid := io.valid
-    fdiv.io.specialIO.out_ready := true.B  // 总是准备好接收输出
-    fdiv.io.specialIO.kill := io.kill
-    
-    // 输出信号
-    io.res := fdiv.io.result
-    io.fflags := fdiv.io.fflags
-    io.busy := !fdiv.io.specialIO.in_ready
-    io.ready := fdiv.io.specialIO.in_ready
+    fdiv.io.inValid := requestFire && !requestIsSqrt
+    fdiv.io.outReady := true.B
+    fdiv.io.kill := io.kill
+
+    fsqrt.io.src := io.rs1Data
+    fsqrt.io.rm := io.rm
+    fsqrt.io.inValid := requestFire && requestIsSqrt
+    fsqrt.io.outReady := true.B
+    fsqrt.io.kill := io.kill
+
+    io.res := Mux(activeIsSqrt, fsqrt.io.result, fdiv.io.result)
+    io.fflags := Mux(activeIsSqrt, fsqrt.io.fflags, fdiv.io.fflags)
+    io.busy := unitBusy
+    io.ready := !unitBusy && selectedReady
 }
 

@@ -85,25 +85,62 @@ class Hazard extends Module {
     }
     
     // ========== 3. RAW数据相关处理 ==========
-    // 判断指令是否需要WB阶段才能访问（load/mul/div/float）
-    def needWB(op: UInt, pipelineIdx: Int): Bool = {
-        val isLoad = op(4) && !op(5)  // op[4]=1表示branch/load/muldiv，但load没有op[5]
-        val isMulDiv = op(4) && ((pipelineIdx == 3) || (pipelineIdx == 4)).B  // 乘除法在流水线3-4
-        val isFloat = op(6)  // op[6]=1表示float（不包括fdiv）
-        // FDiv 需要根据操作码判断，而不是流水线编号
-        val isFDiv = (op === ZirconConfig.EXEOp.FDIV_S) || (op === ZirconConfig.EXEOp.FSQRT_S)
-        val isCSR = op === CSRRW || op === CSRRS || op === CSRRC
-        isLoad || isMulDiv || isFloat || isFDiv || isCSR
+    // A consumer enters EX1 one cycle after this check. It only stalls until
+    // the producer will be visible on the matching EX2/EX3/WB bypass path.
+    def isFloatAdd(op: UInt): Bool = {
+        op === FADD_S || op === FSUB_S
     }
 
-    def blocksConsumerInEx1(pkg: InstructionPackage, pipelineIdx: Int): Bool = {
-        val isFloat = FloatBypass.isFloatProducer(pkg, pipelineIdx)
-        Mux(isFloat, !FloatBypass.availableInEx2(pkg, pipelineIdx), needWB(pkg.op, pipelineIdx))
+    def isFloatConvert(op: UInt): Bool = {
+        op === FCVT_W_S || op === FCVT_WU_S || op === FCVT_S_W || op === FCVT_S_WU
     }
 
-    def blocksConsumerInEx2(pkg: InstructionPackage, pipelineIdx: Int): Bool = {
-        val isFloat = FloatBypass.isFloatProducer(pkg, pipelineIdx)
-        Mux(isFloat, !FloatBypass.availableInEx3(pkg, pipelineIdx), needWB(pkg.op, pipelineIdx))
+    def isFloatPipelineOp(op: UInt, pipelineIdx: Int): Bool = {
+        if (pipelineIdx <= 2) op(6) else false.B
+    }
+
+    def isLoad(op: UInt, pipelineIdx: Int): Bool = {
+        ((pipelineIdx == 5) || (pipelineIdx == 6)).B && op(4) && !op(5)
+    }
+
+    def isMulDiv(op: UInt, pipelineIdx: Int): Bool = {
+        ((pipelineIdx == 3) || (pipelineIdx == 4)).B && op(4)
+    }
+
+    def isIntegerDiv(op: UInt, pipelineIdx: Int): Bool = {
+        isMulDiv(op, pipelineIdx) && op(2)
+    }
+
+    def isIntegerMul(op: UInt, pipelineIdx: Int): Bool = {
+        isMulDiv(op, pipelineIdx) && !op(2)
+    }
+
+    def isCSR(op: UInt): Bool = {
+        op === CSRRW || op === CSRRS || op === CSRRC
+    }
+
+    def multiplyFeedsControl(pkg: InstructionPackage, rd: UInt): Bool = {
+        val isConditional = pkg.op === BEQ || pkg.op === BNE || pkg.op === BLT ||
+            pkg.op === BGE || pkg.op === BLTU || pkg.op === BGEU
+        (isConditional && (pkg.rs1 === rd || pkg.rs2 === rd)) ||
+            (pkg.op === JALR && pkg.rs1 === rd)
+    }
+
+    def floatResultAtEx3(op: UInt, pipelineIdx: Int): Bool = {
+        isFloatPipelineOp(op, pipelineIdx) && (
+            isFloatConvert(op) || op === FDIV_S || op === FSQRT_S
+        )
+    }
+
+    def stallForEx1Producer(op: UInt, pipelineIdx: Int): Bool = {
+        val floatNeedsLaterStage = floatResultAtEx3(op, pipelineIdx) ||
+            (isFloatPipelineOp(op, pipelineIdx) && (isFloatAdd(op) || op === FMUL_S))
+        isLoad(op, pipelineIdx) || isMulDiv(op, pipelineIdx) || floatNeedsLaterStage || isCSR(op)
+    }
+
+    def stallForEx2Producer(op: UInt, pipelineIdx: Int): Bool = {
+        val floatNeedsWB = isFloatPipelineOp(op, pipelineIdx) && (isFloatAdd(op) || op === FMUL_S)
+        isLoad(op, pipelineIdx) || isIntegerDiv(op, pipelineIdx) || floatNeedsWB || isCSR(op)
     }
     
     // 检查RAW冲突：ID阶段的指令依赖EX1或EX2阶段的指令
@@ -180,7 +217,7 @@ class Hazard extends Module {
         // 检查与EX1阶段的冲突
         for (ex1Idx <- 0 until 8) {
             val ex1Pkg = io.backend.ex1Pkgs(ex1Idx)
-            when(ex1Pkg.rdValid && blocksConsumerInEx1(ex1Pkg, ex1Idx)) {
+            when(ex1Pkg.rdValid && stallForEx1Producer(ex1Pkg.op, ex1Idx)) {
                 // 检查rs1, rs2, rs3是否与rd相关
                 val rs1Match = idPkg.rs1 === ex1Pkg.rd
                 val rs2Match = idPkg.rs2 === ex1Pkg.rd
@@ -200,7 +237,7 @@ class Hazard extends Module {
         // 检查与EX2阶段的冲突
         for (ex2Idx <- 0 until 8) {
             val ex2Pkg = io.backend.ex2Pkgs(ex2Idx)
-            when(ex2Pkg.rdValid && blocksConsumerInEx2(ex2Pkg, ex2Idx)) {
+            when(ex2Pkg.rdValid && stallForEx2Producer(ex2Pkg.op, ex2Idx)) {
                 val rs1Match = idPkg.rs1 === ex2Pkg.rd
                 val rs2Match = idPkg.rs2 === ex2Pkg.rd
                 val rs3Match = (idIdx < 3).B && (idPkg.rs3 === ex2Pkg.rd)
@@ -212,6 +249,38 @@ class Hazard extends Module {
                     rawHazard := true.B
                     semanticRawHazard := true.B
                     markRawProducer(ex2Pkg, ex2Idx)
+                }
+            }
+            if (idIdx == 7) {
+                when(ex2Pkg.rdValid && isIntegerMul(ex2Pkg.op, ex2Idx) &&
+                     multiplyFeedsControl(idPkg, ex2Pkg.rd)) {
+                    rawHazard := true.B
+                    semanticRawHazard := true.B
+                    rawIntegerMulHazard := true.B
+                }
+            }
+        }
+        // Floating-point EX3 producers are available either directly from EX3
+        // or from WB in the consumer's following EX1 cycle. Keep the existing
+        // conservative policy for load and variable-latency integer divide.
+        // Integer multiply can leave EX3: the consumer reaches EX1 while the
+        // producer is still available on the existing WB bypass.
+        for (ex3Idx <- 0 until 8) {
+            val ex3Pkg = io.backend.ex3Pkgs(ex3Idx)
+            val nonFloatNeedsWB = isLoad(ex3Pkg.op, ex3Idx) ||
+                isIntegerDiv(ex3Pkg.op, ex3Idx)
+            when(ex3Pkg.rdValid && nonFloatNeedsWB) {
+                val rs1Match = idPkg.rs1 === ex3Pkg.rd
+                val rs2Match = idPkg.rs2 === ex3Pkg.rd
+                val rs3Match = (idIdx < 3).B && (idPkg.rs3 === ex3Pkg.rd)
+                val usedSourceMatch =
+                    (usesRs1(idPkg) && rs1Match) ||
+                    (usesRs2(idPkg) && rs2Match) ||
+                    (usesRs3(idPkg) && rs3Match)
+                when(usedSourceMatch) {
+                    rawHazard := true.B
+                    semanticRawHazard := true.B
+                    markRawProducer(ex3Pkg, ex3Idx)
                 }
             }
         }
