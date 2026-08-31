@@ -16,16 +16,22 @@ class FPUIO extends Bundle {
     val rs3Data = Input(UInt(32.W))    // 源操作数3（保留，本次不用）
     val op = Input(UInt(7.W))          // 操作码
     val rm = Input(UInt(3.W))          // 舍入模式
+    val control = new ZirconFPPipelineControl
     val res = Output(UInt(32.W))       // 运算结果
     val fflags = Output(UInt(5.W))     // 浮点异常标志 {NV, DZ, OF, UF, NX}
 }
 
 class FPU extends Module {
     val io = IO(new FPUIO)
-    
-    // 实例化fudian模块
-    val fadd = Module(new FADD(expWidth, precision))
-    val fmul = Module(new FMUL(expWidth, precision))
+
+    // rm=111 selects the dynamic FRM. Zircon-VLIW has no FCSR yet, so its
+    // architectural reset value (RNE) is used until CSR support is added.
+    val effectiveRm = Mux(io.rm === 7.U, 0.U(3.W), io.rm)
+
+    // Zircon-FloatPoint add/multiply datapaths, cut at the processor's
+    // EX1/EX2/EX3 boundaries and governed by the same stall/flush controls.
+    val fadd = Module(new ZirconFPAddPipeline)
+    val fmul = Module(new ZirconFPMulPipeline)
     val fcmp = Module(new FCMP(expWidth, precision))
     
     // 默认值
@@ -34,19 +40,18 @@ class FPU extends Module {
     
     // ========== 算术运算模块连接 ==========
     // FADD/FSUB
-    fadd.io.a := io.rs1Data
-    // FSUB通过翻转rs2的符号位实现
     val isFSUB = io.op === FSUB_S
-    fadd.io.b := Mux(isFSUB, 
-        Cat(~io.rs2Data(31), io.rs2Data(30, 0)),  // 翻转符号位
-        io.rs2Data
-    )
-    fadd.io.rm := io.rm
+    fadd.io.a := io.rs1Data
+    fadd.io.b := io.rs2Data
+    fadd.io.sub := isFSUB
+    fadd.io.rm := effectiveRm
+    fadd.io.control <> io.control
     
     // FMUL
     fmul.io.a := io.rs1Data
     fmul.io.b := io.rs2Data
-    fmul.io.rm := io.rm
+    fmul.io.rm := effectiveRm
+    fmul.io.control <> io.control
     
     // FCMP - 比较运算
     fcmp.io.a := io.rs1Data
@@ -111,21 +116,53 @@ class FPU extends Module {
         (io.op === FLE_S) -> fcmp.io.le
     ))
     
-    // ========== 输出选择 ==========
-    io.res := MuxCase(defaultRes, Seq(
-        (io.op === FADD_S || io.op === FSUB_S) -> fadd.io.result,
-        (io.op === FMUL_S) -> fmul.io.result,
+    // Non-arithmetic operations are delayed through the same two boundaries,
+    // so every FPU result is aligned with the EX3 instruction package.
+    val simpleRes = MuxCase(defaultRes, Seq(
         (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp_res,
         (io.op === FSGNJ_S || io.op === FSGNJN_S || io.op === FSGNJX_S) -> fsgnj_res,
         (io.op === FMIN_S || io.op === FMAX_S) -> fmin_max_res,
         (io.op === FCLASS_S) -> fclass_res,
         (io.op === FMV_X_W || io.op === FMV_W_X) -> fmv_res
     ))
-    
-    io.fflags := MuxCase(defaultFflags, Seq(
-        (io.op === FADD_S || io.op === FSUB_S) -> fadd.io.fflags,
-        (io.op === FMUL_S) -> fmul.io.fflags,
-        (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp.io.fflags
+    val simpleFlags = Mux(
+        io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S,
+        fcmp.io.fflags,
+        defaultFflags
+    )
+
+    val opS1 = RegInit(0.U(7.W))
+    val simpleResS1 = RegInit(0.U(32.W))
+    val simpleFlagsS1 = RegInit(0.U(5.W))
+    when(io.control.s1Flush) {
+        opS1 := 0.U
+        simpleResS1 := 0.U
+        simpleFlagsS1 := 0.U
+    }.elsewhen(io.control.s1Enable) {
+        opS1 := io.op
+        simpleResS1 := simpleRes
+        simpleFlagsS1 := simpleFlags
+    }
+
+    val opS2 = RegInit(0.U(7.W))
+    val simpleResS2 = RegInit(0.U(32.W))
+    val simpleFlagsS2 = RegInit(0.U(5.W))
+    when(io.control.s2Flush) {
+        opS2 := 0.U
+        simpleResS2 := 0.U
+        simpleFlagsS2 := 0.U
+    }.elsewhen(io.control.s2Enable) {
+        opS2 := opS1
+        simpleResS2 := simpleResS1
+        simpleFlagsS2 := simpleFlagsS1
+    }
+
+    io.res := MuxCase(simpleResS2, Seq(
+        (opS2 === FADD_S || opS2 === FSUB_S) -> fadd.io.result,
+        (opS2 === FMUL_S) -> fmul.io.result
+    ))
+    io.fflags := MuxCase(simpleFlagsS2, Seq(
+        (opS2 === FADD_S || opS2 === FSUB_S) -> fadd.io.fflags,
+        (opS2 === FMUL_S) -> fmul.io.fflags
     ))
 }
-

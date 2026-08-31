@@ -53,6 +53,10 @@ class FDivFPUPipeline extends Module {
     fpu.io.rs3Data := ex1Rs3Data
     fpu.io.op := ex1Pkg.op
     fpu.io.rm := ex1Pkg.rm
+    fpu.io.control.s1Enable := !io.hazard.ex2Stall
+    fpu.io.control.s1Flush := io.hazard.ex2Flush
+    fpu.io.control.s2Enable := !io.hazard.ex3Stall
+    fpu.io.control.s2Flush := io.hazard.ex3Flush
     
     // EX1阶段更新InstPkg
     val ex1PkgOut = ex1Pkg.EX1Update(alu.io.res, 0.U, false.B)
@@ -70,20 +74,19 @@ class FDivFPUPipeline extends Module {
     when(io.hazard.ex3Flush) {
         ex3Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex3Stall) {
-        // EX3阶段更新fpuResult（根据是否是FDiv选择结果）
-        val isFDiv = ex2Pkg.op === ZirconConfig.EXEOp.FDIV_S || 
-                     ex2Pkg.op === ZirconConfig.EXEOp.FSQRT_S
-        val fpuRes = Mux(isFDiv, fdiv.io.res, fpu.io.res)
-        val fpuFlags = Mux(isFDiv, fdiv.io.fflags, fpu.io.fflags)
-        ex3Pkg := ex2Pkg.EX3Update(fpuRes, fpuFlags)
+        ex3Pkg := ex2Pkg
     }
     
     // ========== WB阶段 ==========
     val wbPkg = RegInit(0.U.asTypeOf(new InstructionPackage))
+    val ex3IsFDiv = ex3Pkg.op === ZirconConfig.EXEOp.FDIV_S ||
+                    ex3Pkg.op === ZirconConfig.EXEOp.FSQRT_S
+    val ex3FpuRes = Mux(ex3IsFDiv, fdiv.io.res, fpu.io.res)
+    val ex3FpuFlags = Mux(ex3IsFDiv, fdiv.io.fflags, fpu.io.fflags)
     when(io.hazard.wbFlush) {
         wbPkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.wbStall) {
-        wbPkg := ex3Pkg
+        wbPkg := ex3Pkg.EX3Update(ex3FpuRes, ex3FpuFlags)
     }
     
     // WB阶段：根据rd类型选择写回数据

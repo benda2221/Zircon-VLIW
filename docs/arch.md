@@ -288,7 +288,7 @@ SRT2 除法器占据 EX1、EX2、EX3 三级流水线，其结果必须等到 WB 
 
 #### FPU（浮点运算单元）
 
-FPU 占据 EX1、EX2、EX3 三级流水，基于 Fudian 浮点库实现，支持以下运算：
+FPU 占据 EX1、EX2、EX3 三级流水。FADD、FSUB 和 FMUL 使用 Zircon-FloatPoint 数据通路，其他操作继续复用 Fudian 浮点模块，支持以下运算：
 
 - **基本算术**：加法（FADD）、减法（FSUB）、乘法（FMUL）
 - **符号注入**：FSGNJ、FSGNJN、FSGNJX
@@ -296,7 +296,7 @@ FPU 占据 EX1、EX2、EX3 三级流水，基于 Fudian 浮点库实现，支持
 - **分类指令**：FCLASS
 - **寄存器移动**：FMV.X.W、FMV.W.X
 
-其结果在 WB 阶段才能前递。FPU 会输出 5 位的浮点状态标志（fflags）。
+加法/减法依次完成“分类与对阶、有效数运算与规格化、舍入与打包”，乘法依次完成“分类与有效数乘积、规格化、舍入与打包”。两个段间寄存器与处理器的 stall/flush 同步，结果在 EX3→WB 边界写入指令包，因此可以每周期接收一条新运算且不会与指令包错位。其结果在 WB 阶段才能前递。FPU 会输出 5 位的浮点状态标志（fflags）。详细设计与验证范围见 [Zircon 浮点加法与乘法流水线](zircon-fp-add-mul.md)。
 
 **类型转换支持**：1-2 号流水线的 FPU 额外支持浮点-整数类型转换：
 - 1 号流水线：FPToInt（FCVT.W.S、FCVT.WU.S）
