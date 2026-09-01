@@ -8,9 +8,7 @@ class ALUFPUPipelineIO extends Bundle {
     val hazard = new PipelineHazardIO
 }
 
-// ALUFPUPipeline 支持类型转换
-// convertType: 1 = FPToInt (1号流水线), 0 = IntToFP (2号流水线)
-class ALUFPUPipeline(val convertType: Int = 0) extends Module {
+class ALUFPUPipeline extends Module {
     val io = IO(new ALUFPUPipelineIO)
     
     // ========== EX1阶段 ==========
@@ -42,32 +40,6 @@ class ALUFPUPipeline(val convertType: Int = 0) extends Module {
     fpu.io.control.s2Enable := !io.hazard.ex3Stall
     fpu.io.control.s2Flush := io.hazard.ex3Flush
     
-    // 类型转换模块实例化
-    val fpuConvert = Module(new FPUConvert(convertType))
-    fpuConvert.io.rs1Data := ex1Rs1Data
-    fpuConvert.io.op := ex1Pkg.op
-    fpuConvert.io.rm := Mux(ex1Pkg.rm === 7.U, 0.U, ex1Pkg.rm)
-
-    val convertResS1 = RegInit(0.U(32.W))
-    val convertFlagsS1 = RegInit(0.U(5.W))
-    when(io.hazard.ex2Flush) {
-        convertResS1 := 0.U
-        convertFlagsS1 := 0.U
-    }.elsewhen(!io.hazard.ex2Stall) {
-        convertResS1 := fpuConvert.io.res
-        convertFlagsS1 := fpuConvert.io.fflags
-    }
-
-    val convertResS2 = RegInit(0.U(32.W))
-    val convertFlagsS2 = RegInit(0.U(5.W))
-    when(io.hazard.ex3Flush) {
-        convertResS2 := 0.U
-        convertFlagsS2 := 0.U
-    }.elsewhen(!io.hazard.ex3Stall) {
-        convertResS2 := convertResS1
-        convertFlagsS2 := convertFlagsS1
-    }
-    
     // EX1阶段更新InstPkg
     val ex1PkgOut = ex1Pkg.EX1Update(alu.io.res, 0.U, false.B)
     
@@ -89,19 +61,10 @@ class ALUFPUPipeline(val convertType: Int = 0) extends Module {
     
     // ========== WB阶段 ==========
     val wbPkg = RegInit(0.U.asTypeOf(new InstructionPackage))
-    val ex3IsConvert = if (convertType == 1) {
-        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_W_S ||
-        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_WU_S
-    } else {
-        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_S_W ||
-        ex3Pkg.op === ZirconConfig.EXEOp.FCVT_S_WU
-    }
-    val ex3FpuRes = Mux(ex3IsConvert, convertResS2, fpu.io.res)
-    val ex3FpuFlags = Mux(ex3IsConvert, convertFlagsS2, fpu.io.fflags)
     when(io.hazard.wbFlush) {
         wbPkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.wbStall) {
-        wbPkg := ex3Pkg.EX3Update(ex3FpuRes, ex3FpuFlags)
+        wbPkg := ex3Pkg.EX3Update(fpu.io.res, fpu.io.fflags)
     }
     
     // WB阶段：选择写回数据（FPU指令用fpuResult，ALU指令用aluResult）

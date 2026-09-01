@@ -18,6 +18,13 @@ else
 	@BUILD_MODE=sim ./mill -s -j0 _.runMain Main
 endif
 
+test-fmem-verilator: verilog
+	@mkdir -p build/fmem-verilator
+	@verilator --cc --exe --build --top-module CPU -Wno-fatal \
+		--Mdir build/fmem-verilator verilog/*.sv \
+		src/test/cpp/ZirconFMemCPUHarness.cpp -CFLAGS '-std=c++17 -O2'
+	@build/fmem-verilator/VCPU
+
 
 run:
 	@$(MAKE) -C ZirconSim run $(IMG)

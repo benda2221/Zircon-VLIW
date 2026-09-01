@@ -89,10 +89,9 @@ class FDivFPUPipeline extends Module {
         wbPkg := ex3Pkg.EX3Update(ex3FpuRes, ex3FpuFlags)
     }
     
-    // WB阶段：根据rd类型选择写回数据
-    // rd[5]=0: GPR (使用ALU结果)，rd[5]=1: FPR (使用FPU结果)
+    // WB阶段：浮点比较、转换和位搬运可能写 GPR，但结果仍来自 FPU。
     val isGPR = !wbPkg.rd(5)
-    val wbData = Mux(isGPR, wbPkg.aluResult, wbPkg.fpuResult)
+    val wbData = Mux(wbPkg.op(6), wbPkg.fpuResult, wbPkg.aluResult)
     val wbPkgOut = wbPkg.WBUpdate(wbData)
     
     // 写回到寄存器堆

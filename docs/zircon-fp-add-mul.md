@@ -2,7 +2,7 @@
 
 ## 范围
 
-本次融合以 [Zircon-FloatPoint](https://github.com/MAdrid1011/Zircon-FloatPoint) 的 `bc66c30` 版本为输入设计基线，只替换单精度 `FADD.S`、`FSUB.S` 和 `FMUL.S` 的算术数据通路。原实现只覆盖组合路径和主要 RNE 正常数场景，因此融合时补齐了流水控制、五种舍入模式、特殊值、非规格数和异常标志。浮点除法、开平方和融合乘加不属于该单元，也不在本次回归范围内。比较、分类、搬运和格式转换仍由原有模块处理。
+本次融合以 [Zircon-FloatPoint](https://github.com/MAdrid1011/Zircon-FloatPoint) 的 `bc66c30` 版本为输入设计基线，只替换单精度 `FADD.S`、`FSUB.S` 和 `FMUL.S` 的算术数据通路。原实现只覆盖组合路径和主要 RNE 正常数场景，因此融合时补齐了流水控制、五种舍入模式、特殊值、非规格数和异常标志。浮点除法、开平方和融合乘加不属于该单元，也不在本次回归范围内。比较、分类继续复用原有模块；访存、搬运和格式转换的完整通路见 [RV32F 访存与整数转换](zircon-f-memory-convert.md)。
 
 实现位于 `src/main/scala/Backend/FunctionUnit/ZirconFPAddMul.scala`，接口通过 `FPU.scala` 接入 0～2 号浮点流水线。
 

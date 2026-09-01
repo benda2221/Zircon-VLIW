@@ -16,9 +16,9 @@ class FrontendBackendIO extends Bundle {
     val gprWen = Input(Vec(8, Bool()))      // 8个GPR写口
     val gprWaddr = Input(Vec(8, UInt(5.W)))
     val gprWdata = Input(Vec(8, UInt(32.W)))
-    val fprWen = Input(Vec(3, Bool()))
-    val fprWaddr = Input(Vec(3, UInt(5.W)))
-    val fprWdata = Input(Vec(3, UInt(32.W)))
+    val fprWen = Input(Vec(5, Bool()))
+    val fprWaddr = Input(Vec(5, UInt(5.W)))
+    val fprWdata = Input(Vec(5, UInt(32.W)))
 }
 
 // 前端与Hazard接口
@@ -98,32 +98,29 @@ class Frontend extends Module {
         decoders(i).io.instPkgIn := idInstPkgs(i)
     }
     
-    // 寄存器堆：GPR 14读8写，FPR 9读3写
-    val grf = Module(new Regfile(nr = 14, nw = 8))
-    val frf = Module(new Regfile(nr = 9, nw = 3))
+    // 寄存器堆：所有执行槽均可读取 GPR；FPU 槽和两个 LSU 槽可读取 FPR。
+    // LSU 的额外 FPR 读口用于 FSW，额外写口用于 FLW。
+    val grf = Module(new Regfile(nr = 16, nw = 8))
+    val frf = Module(new Regfile(nr = 11, nw = 5))
     
     // ========== 寄存器堆读端口连接 ==========
-    // 根据文档表格，连接读端口
-    // GPR读端口分配: 流水线0需要0个，流水线1-7各需要2个
-    // FPR读端口分配: 流水线0-2各需要3个，流水线3-7需要0个
-    
-    // 流水线0: 0个GPR，3个FPR (rs1, rs2, rs3)
-    frf.io.raddr(0) := idInstPkgs(0).inst(19, 15)
-    frf.io.raddr(1) := idInstPkgs(0).inst(24, 20)
-    frf.io.raddr(2) := idInstPkgs(0).inst(31, 27)
-    
-    // 流水线1-7: 各2个GPR (rs1, rs2)
-    for (i <- 1 until 8) {
-        grf.io.raddr((i-1)*2)     := idInstPkgs(i).inst(19, 15)
-        grf.io.raddr((i-1)*2 + 1) := idInstPkgs(i).inst(24, 20)
+    // 流水线0-7: 各2个GPR (rs1, rs2)。0号槽需要这些端口以支持
+    // FCVT.S.W[U]/FMV.W.X 被打包到任意 FPU 槽的情况。
+    for (i <- 0 until 8) {
+        grf.io.raddr(i * 2)     := idInstPkgs(i).inst(19, 15)
+        grf.io.raddr(i * 2 + 1) := idInstPkgs(i).inst(24, 20)
     }
     
-    // 流水线1-2: 各3个FPR (rs1, rs2, rs3)
-    for (i <- 1 until 3) {
-        frf.io.raddr(3 + (i-1)*3)     := idInstPkgs(i).inst(19, 15)
-        frf.io.raddr(3 + (i-1)*3 + 1) := idInstPkgs(i).inst(24, 20)
-        frf.io.raddr(3 + (i-1)*3 + 2) := idInstPkgs(i).inst(31, 27)
+    // 流水线0-2: 各3个FPR (rs1, rs2, rs3)
+    for (i <- 0 until 3) {
+        frf.io.raddr(i * 3)     := idInstPkgs(i).inst(19, 15)
+        frf.io.raddr(i * 3 + 1) := idInstPkgs(i).inst(24, 20)
+        frf.io.raddr(i * 3 + 2) := idInstPkgs(i).inst(31, 27)
     }
+
+    // 流水线5-6: FSW 的 rs2 浮点源。
+    frf.io.raddr(9) := idInstPkgs(5).inst(24, 20)
+    frf.io.raddr(10) := idInstPkgs(6).inst(24, 20)
     
     // ========== 寄存器堆写端口连接（来自后端）==========
     for (i <- 0 until 8) {
@@ -132,7 +129,7 @@ class Frontend extends Module {
         grf.io.wdata(i) := io.backend.gprWdata(i)
     }
     
-    for (i <- 0 until 3) {
+    for (i <- 0 until 5) {
         frf.io.wen(i) := io.backend.fprWen(i)
         frf.io.waddr(i) := io.backend.fprWaddr(i)
         frf.io.wdata(i) := io.backend.fprWdata(i)
@@ -141,29 +138,35 @@ class Frontend extends Module {
     // ========== 组装寄存器数据到InstPkg ==========
     val decodedInstPkgs = Wire(Vec(8, new InstructionPackage))
     
-    // 流水线0: 3个FPR数据
-    decodedInstPkgs(0) := decoders(0).io.instPkgOut.IDUpdate(
-        frf.io.rdata(0),
-        frf.io.rdata(1),
-        frf.io.rdata(2)
-    )
-    
-    // 流水线1-2: ALU+FPU，根据rs1/rs2/rs3最高位选择GPR或FPR
-    for (i <- 1 until 3) {
-        val gprBase = (i-1) * 2
-        val fprBase = 3 + (i-1) * 3
+    // 流水线0-2: ALU+FPU，根据每个源寄存器各自的类型位选择 GPR/FPR。
+    for (i <- 0 until 3) {
+        val gprBase = i * 2
+        val fprBase = i * 3
         val rs1Data = Mux(decoders(i).io.instPkgOut.rs1(5), frf.io.rdata(fprBase),     grf.io.rdata(gprBase))
         val rs2Data = Mux(decoders(i).io.instPkgOut.rs2(5), frf.io.rdata(fprBase + 1), grf.io.rdata(gprBase + 1))
         val rs3Data = Mux(decoders(i).io.instPkgOut.rs3(5), frf.io.rdata(fprBase + 2), 0.U)
         decodedInstPkgs(i) := decoders(i).io.instPkgOut.IDUpdate(rs1Data, rs2Data, rs3Data)
     }
     
-    // 流水线3-7: 只有GPR
-    for (i <- 3 until 8) {
-        val gprBase = (i-1) * 2
+    // 流水线3、4、7: 只有GPR。
+    for (i <- Seq(3, 4, 7)) {
+        val gprBase = i * 2
         decodedInstPkgs(i) := decoders(i).io.instPkgOut.IDUpdate(
             grf.io.rdata(gprBase),
             grf.io.rdata(gprBase + 1),
+            0.U
+        )
+    }
+
+    // 流水线5-6: 地址基址来自 GPR；FSW 的 rs2 来自 FPR，普通 store/ALU
+    // 仍从 GPR 读取。
+    for (i <- 5 until 7) {
+        val gprBase = i * 2
+        val fprPort = 9 + (i - 5)
+        val rs2Data = Mux(decoders(i).io.instPkgOut.rs2(5), frf.io.rdata(fprPort), grf.io.rdata(gprBase + 1))
+        decodedInstPkgs(i) := decoders(i).io.instPkgOut.IDUpdate(
+            grf.io.rdata(gprBase),
+            rs2Data,
             0.U
         )
     }

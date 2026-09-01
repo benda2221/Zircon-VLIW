@@ -7,7 +7,8 @@ import fudian._
 /**
  * FPU包装类 - 封装fudian浮点运算模块
  * 支持: FADD, FSUB, FMUL, FEQ, FLT, FLE, FSGNJ, FSGNJN, FSGNJX, 
- *       FMIN, FMAX, FCLASS, FMV.X.W, FMV.W.X
+ *       FMIN, FMAX, FCLASS, FMV.X.W, FMV.W.X,
+ *       FCVT.W.S, FCVT.WU.S, FCVT.S.W, FCVT.S.WU
  * 不支持: FCMA系列（FMADD, FMSUB, FNMADD, FNMSUB）
  */
 class FPUIO extends Bundle {
@@ -33,6 +34,8 @@ class FPU extends Module {
     val fadd = Module(new ZirconFPAddPipeline)
     val fmul = Module(new ZirconFPMulPipeline)
     val fcmp = Module(new FCMP(expWidth, precision))
+    val fpToInt = Module(new FPUConvert(convertType = 1))
+    val intToFP = Module(new FPUConvert(convertType = 0))
     
     // 默认值
     val defaultRes = 0.U(32.W)
@@ -52,6 +55,15 @@ class FPU extends Module {
     fmul.io.b := io.rs2Data
     fmul.io.rm := effectiveRm
     fmul.io.control <> io.control
+
+    // RV32F conversions are available in every FPU lane. This is required
+    // because the VLIW packer may place them in any of slots 0-2.
+    fpToInt.io.rs1Data := io.rs1Data
+    fpToInt.io.op := io.op
+    fpToInt.io.rm := effectiveRm
+    intToFP.io.rs1Data := io.rs1Data
+    intToFP.io.op := io.op
+    intToFP.io.rm := effectiveRm
     
     // FCMP - 比较运算
     fcmp.io.a := io.rs1Data
@@ -107,6 +119,11 @@ class FPU extends Module {
         (io.op === FMV_X_W) -> io.rs1Data,    // 直接传递浮点位模式到整数
         (io.op === FMV_W_X) -> io.rs1Data     // 直接传递整数到浮点
     ))
+
+    val isFPToInt = io.op === FCVT_W_S || io.op === FCVT_WU_S
+    val isIntToFP = io.op === FCVT_S_W || io.op === FCVT_S_WU
+    val convertRes = Mux(isFPToInt, fpToInt.io.res, intToFP.io.res)
+    val convertFlags = Mux(isFPToInt, fpToInt.io.fflags, intToFP.io.fflags)
     
     // ========== 比较结果 ==========
     val fcmp_res = Wire(UInt(32.W))
@@ -123,13 +140,13 @@ class FPU extends Module {
         (io.op === FSGNJ_S || io.op === FSGNJN_S || io.op === FSGNJX_S) -> fsgnj_res,
         (io.op === FMIN_S || io.op === FMAX_S) -> fmin_max_res,
         (io.op === FCLASS_S) -> fclass_res,
-        (io.op === FMV_X_W || io.op === FMV_W_X) -> fmv_res
+        (io.op === FMV_X_W || io.op === FMV_W_X) -> fmv_res,
+        (isFPToInt || isIntToFP) -> convertRes
     ))
-    val simpleFlags = Mux(
-        io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S,
-        fcmp.io.fflags,
-        defaultFflags
-    )
+    val simpleFlags = MuxCase(defaultFflags, Seq(
+        (io.op === FEQ_S || io.op === FLT_S || io.op === FLE_S) -> fcmp.io.fflags,
+        (isFPToInt || isIntToFP) -> convertFlags
+    ))
 
     val opS1 = RegInit(0.U(7.W))
     val simpleResS1 = RegInit(0.U(32.W))

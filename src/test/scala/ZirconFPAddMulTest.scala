@@ -269,7 +269,7 @@ class ZirconFPAddMulTest extends AnyFlatSpec with ChiselScalatestTester {
     }
 
     it should "write back back-to-back results in the ALU/FPU VLIW lane" in {
-        test(new ALUFPUPipeline(0)) { dut =>
+        test(new ALUFPUPipeline) { dut =>
             clearPackage(dut.io.backend.instPkgIn)
             dut.io.forward.fwdRs1Data.poke(0.U)
             dut.io.forward.fwdRs2Data.poke(0.U)
