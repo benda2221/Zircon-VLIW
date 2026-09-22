@@ -36,17 +36,29 @@ class ALUiMDPipeline extends Module {
     val srt2 = Module(new SRT2)
     srt2.io.src1 := ex1Rs1Data
     srt2.io.src2 := ex1Rs2Data
-    srt2.io.op := ex1Pkg.op(4, 0)
+    val replayHold = io.hazard.ex1Stall && io.hazard.ex2Stall &&
+        !io.hazard.ex3Stall
+    srt2.io.op := Mux(replayHold, 0.U, ex1Pkg.op(4, 0))
     
     // Multiply实例化（内部有3级流水，结果在EX3阶段有效）
     val multiply = Module(new MulBooth2Wallce)
     multiply.io.src1 := ex1Rs1Data
     multiply.io.src2 := ex1Rs2Data
     multiply.io.op := ex1Pkg.op(4, 0)
-    multiply.io.divBusy := srt2.io.busy
+    // Freeze the multiplier only when EX3 is also held.  A nested replay uses
+    // ex2Stall=1/ex3Stall=0 to drain the current EX2 packet; the multiplier
+    // must advance with that packet on the drain cycle.
+    multiply.io.divBusy := io.hazard.ex3Stall
     
     // EX1阶段：只保存ALU结果，乘除法器在内部流水
-    val ex1PkgOut = ex1Pkg.EX1Update(alu.io.res, 0.U, false.B)
+    val ex1PkgOut = WireDefault(ex1Pkg.EX1Update(alu.io.res, 0.U, false.B))
+    ex1PkgOut.rs1Data := ex1Rs1Data
+    ex1PkgOut.rs2Data := ex1Rs2Data
+    ex1PkgOut.shallowRs1Sel := io.forward.shallowRs1Sel
+    ex1PkgOut.shallowRs2Sel := io.forward.shallowRs2Sel
+    ex1PkgOut.lateRs1Sel := io.forward.lateRs1Sel
+    ex1PkgOut.lateRs2Sel := io.forward.lateRs2Sel
+    ex1PkgOut.needsEX2Replay := io.forward.needsEX2Replay
     
     // 输出divBusy信号给Hazard
     io.hazard.divBusy := srt2.io.busy
@@ -55,8 +67,30 @@ class ALUiMDPipeline extends Module {
     val ex2Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
     when(io.hazard.ex2Flush) {
         ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
+    }.elsewhen(io.hazard.ex2Stall && !io.hazard.ex3Stall) {
+        ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex2Stall) {
         ex2Pkg := ex1PkgOut
+    }
+
+    val aluEX2 = Module(new ALU)
+    aluEX2.io.src1 := Mux(
+        ex2Pkg.src1Sel === 0.U,
+        io.forward.replayRs1Data,
+        ex2Pkg.pc
+    )
+    aluEX2.io.src2 := Mux(
+        ex2Pkg.src2Sel === 0.U,
+        io.forward.replayRs2Data,
+        ex2Pkg.imm
+    )
+    aluEX2.io.op := ex2Pkg.op
+
+    val ex2PkgOut = WireDefault(ex2Pkg)
+    ex2PkgOut.rs1Data := io.forward.replayRs1Data
+    ex2PkgOut.rs2Data := io.forward.replayRs2Data
+    when(ex2Pkg.needsEX2Replay) {
+        ex2PkgOut.aluResult := aluEX2.io.res
     }
     
     // ========== EX3阶段 ==========
@@ -69,7 +103,7 @@ class ALUiMDPipeline extends Module {
     when(io.hazard.ex3Flush) {
         ex3Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex3Stall) {
-        ex3Pkg := ex2Pkg
+        ex3Pkg := ex2PkgOut
     }
     
     // 缓存EX3阶段的乘除法结果，与ex3Pkg同步传递到WB
@@ -111,4 +145,3 @@ class ALUiMDPipeline extends Module {
     io.hazard.ex1Pkg := ex1Pkg
     io.hazard.ex2Pkg := ex2Pkg
 }
-

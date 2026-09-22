@@ -14,7 +14,6 @@ class Hazard extends Module {
     io.frontend.flush := false.B
     io.frontend.stall := false.B
     for (i <- 0 until 8) {
-        io.backend.ex1Flush(i) := false.B
         io.backend.ex1Stall(i) := false.B
         io.backend.ex2Flush(i) := false.B
         io.backend.ex2Stall(i) := false.B
@@ -43,14 +42,37 @@ class Hazard extends Module {
     }
     
     // ========== 2. 分支预测失败处理（次优先级）==========
-    when(!divStall && io.backend.predFail) {
+    // EX3浅依赖分支比EX2普通分支更老，因此具有更高优先级。
+    val ex3Redirect = io.backend.predFailEX3
+    val ex2Redirect = io.backend.predFailEX2 && !ex3Redirect
+
+    // A nested dependency exists when a lane that needs cross-packet late
+    // forwarding is itself selected as a same-packet shallow producer.
+    val laneNeedsLate = Wire(Vec(8, Bool()))
+    for (i <- 0 until 8) {
+        laneNeedsLate(i) := io.backend.ex1LateRs1Sel(i).orR ||
+            io.backend.ex1LateRs2Sel(i).orR
+    }
+    val lateLaneMask = laneNeedsLate.asUInt
+    val nestedLateShallow = WireInit(false.B)
+    for (consumer <- 0 until 8) {
+        val shallowProducer = io.backend.ex1ShallowRs1Sel(consumer) |
+            io.backend.ex1ShallowRs2Sel(consumer)
+        when((shallowProducer & lateLaneMask).orR) {
+            nestedLateShallow := true.B
+        }
+    }
+
+    when(!divStall && ex3Redirect) {
         // 给前端flush信号
         io.frontend.flush := true.B
-        // 给ID-EX1段间寄存器flush信号
         for (i <- 0 until 8) {
-            io.backend.ex1Flush(i) := true.B
+            io.backend.ex2Flush(i) := true.B
+            // EX3重定向还必须清除当前EX2中更年轻的指令。
+            io.backend.ex3Flush(i) := true.B
         }
-        // 给EX1-EX2段间寄存器flush信号（Branch在EX1阶段，所以EX1的指令也要flush）
+    }.elsewhen(!divStall && ex2Redirect) {
+        io.frontend.flush := true.B
         for (i <- 0 until 8) {
             io.backend.ex2Flush(i) := true.B
         }
@@ -68,8 +90,7 @@ class Hazard extends Module {
     }
     
     // 检查RAW冲突：ID阶段的指令依赖EX1或EX2阶段的指令
-    val rawHazard = Wire(Bool())
-    rawHazard := false.B
+    val rawHazard = WireInit(false.B)
     
     for (idIdx <- 0 until 8) {  // ID阶段的8条指令
         val idPkg = io.frontend.idPkgs(idIdx)
@@ -77,40 +98,69 @@ class Hazard extends Module {
         // 检查与EX1阶段的冲突
         for (ex1Idx <- 0 until 8) {
             val ex1Pkg = io.backend.ex1Pkgs(ex1Idx)
-            when(ex1Pkg.rdValid && needWB(ex1Pkg.op, ex1Idx)) {
-                // 检查rs1, rs2, rs3是否与rd相关
-                val rs1Match = idPkg.rs1 === ex1Pkg.rd
-                val rs2Match = idPkg.rs2 === ex1Pkg.rd
-                val rs3Match = (idIdx < 3).B && (idPkg.rs3 === ex1Pkg.rd)  // 只有前3条流水线有rs3
-                when(rs1Match || rs2Match || rs3Match) {
-                    rawHazard := true.B
-                }
+            val rs1Match = idPkg.rs1ReadValid && idPkg.rs1 === ex1Pkg.rd
+            val rs2Match = idPkg.rs2ReadValid && idPkg.rs2 === ex1Pkg.rd
+            val rs3Match = (idIdx < 3).B && (idPkg.rs3 === ex1Pkg.rd)
+            val anyMatch = rs1Match || rs2Match || rs3Match
+            val replayRs12MustStall = io.backend.ex1NeedsEX2Replay(ex1Idx) &&
+                !idPkg.shallowDepOK && (rs1Match || rs2Match)
+            val replayRs3MustStall = io.backend.ex1NeedsEX2Replay(ex1Idx) && rs3Match
+            when(ex1Pkg.rdValid && needWB(ex1Pkg.op, ex1Idx) && anyMatch) {
+                rawHazard := true.B
+            }
+            when(ex1Pkg.rdValid &&
+                 (replayRs12MustStall || replayRs3MustStall)) {
+                rawHazard := true.B
             }
         }
         
         // 检查与EX2阶段的冲突
         for (ex2Idx <- 0 until 8) {
             val ex2Pkg = io.backend.ex2Pkgs(ex2Idx)
-            when(ex2Pkg.rdValid && needWB(ex2Pkg.op, ex2Idx)) {
-                val rs1Match = idPkg.rs1 === ex2Pkg.rd
-                val rs2Match = idPkg.rs2 === ex2Pkg.rd
-                val rs3Match = (idIdx < 3).B && (idPkg.rs3 === ex2Pkg.rd)
-                when(rs1Match || rs2Match || rs3Match) {
-                    rawHazard := true.B
-                }
+            val rs1Match = idPkg.rs1ReadValid && idPkg.rs1 === ex2Pkg.rd
+            val rs2Match = idPkg.rs2ReadValid && idPkg.rs2 === ex2Pkg.rd
+            val rs3Match = (idIdx < 3).B && (idPkg.rs3 === ex2Pkg.rd)
+            val anyMatch = rs1Match || rs2Match || rs3Match
+            val replayRs12MustStall = ex2Pkg.needsEX2Replay &&
+                !idPkg.shallowDepOK && (rs1Match || rs2Match)
+            val replayRs3MustStall = ex2Pkg.needsEX2Replay && rs3Match
+            when(ex2Pkg.rdValid && needWB(ex2Pkg.op, ex2Idx) && anyMatch) {
+                rawHazard := true.B
+            }
+            when(ex2Pkg.rdValid &&
+                 (replayRs12MustStall || replayRs3MustStall)) {
+                rawHazard := true.B
             }
         }
     }
     
     // RAW冲突处理：如果没有除法器停顿和分支冲刷，则处理RAW冲突
     // 注意：分支冲刷优先于RAW stall，否则PC无法更新到正确的跳转地址
-    when(!divStall && !io.backend.predFail && rawHazard) {
-        // 对前端发起停顿
+    val takeNested = !divStall && !ex3Redirect && !ex2Redirect &&
+        nestedLateShallow
+    when(takeNested) {
         io.frontend.stall := true.B
-        // 冲刷ID-EX1寄存器
         for (i <- 0 until 8) {
-            io.backend.ex1Flush(i) := true.B
+            io.backend.ex1Stall(i) := true.B
+            io.backend.ex2Stall(i) := true.B
+            // ex3Stall remains false: drain the old EX2 packet into EX3.
         }
     }
-}
 
+    val takeRawFlush = !divStall && !ex3Redirect && !ex2Redirect &&
+        !nestedLateShallow && rawHazard
+    val takeBranchFlush = !divStall && (ex3Redirect || ex2Redirect)
+    when(takeRawFlush) {
+        // 对前端发起停顿
+        io.frontend.stall := true.B
+    }
+
+    // Both causes clear the next ID-EX1 contents. Only a taken redirect
+    // cancels current execution; a RAW bubble must let the EX1 producer run.
+    for (i <- 0 until 8) {
+        io.backend.ex1RawFlush(i) := takeRawFlush
+        io.backend.ex1BranchFlush(i) := takeBranchFlush
+        io.backend.ex1Flush(i) := takeRawFlush || takeBranchFlush
+    }
+
+}

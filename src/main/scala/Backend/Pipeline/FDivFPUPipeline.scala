@@ -4,6 +4,7 @@ import chisel3.util._
 // FDivFPUPipeline 特有的 Hazard IO（包含 FDiv busy 信号）
 class FDivFPUPipelineHazardIO extends PipelineHazardIO {
     val fdivBusy = Output(Bool())
+    val branchFlush = Input(Bool()) // accepted redirect, excluding RAW bubbles
 }
 
 class FDivFPUPipelineIO extends Bundle {
@@ -42,9 +43,11 @@ class FDivFPUPipeline extends Module {
     // 判断是否是 FDiv 指令
     val isFDivOp = ex1Pkg.op === ZirconConfig.EXEOp.FDIV_S || 
                    ex1Pkg.op === ZirconConfig.EXEOp.FSQRT_S
-    fdiv.io.valid := ex1Pkg.rdValid && isFDivOp
-    // 分支预测失败或流水线冲刷时终止 FDiv 运算
-    fdiv.io.kill := io.hazard.ex1Flush || io.hazard.ex2Flush || io.hazard.ex3Flush
+    val replayHold = io.hazard.ex1Stall && io.hazard.ex2Stall &&
+        !io.hazard.ex3Stall
+    fdiv.io.valid := ex1Pkg.rdValid && isFDivOp && !replayHold
+    // RAW clears the next ID-EX1 contents but must not kill the current FDIV.
+    fdiv.io.kill := io.hazard.branchFlush
     
     // FPU实例化
     val fpu = Module(new FPU)
@@ -54,35 +57,72 @@ class FDivFPUPipeline extends Module {
     fpu.io.op := ex1Pkg.op
     fpu.io.rm := ex1Pkg.rm
     fpu.io.control.s1Enable := !io.hazard.ex2Stall
-    fpu.io.control.s1Flush := io.hazard.ex2Flush
+    fpu.io.control.s1Flush := io.hazard.ex2Flush ||
+        (io.hazard.ex2Stall && !io.hazard.ex3Stall)
     fpu.io.control.s2Enable := !io.hazard.ex3Stall
     fpu.io.control.s2Flush := io.hazard.ex3Flush
     
     // EX1阶段更新InstPkg
-    val ex1PkgOut = ex1Pkg.EX1Update(alu.io.res, 0.U, false.B)
+    val ex1PkgOut = WireDefault(ex1Pkg.EX1Update(alu.io.res, 0.U, false.B))
+    ex1PkgOut.rs1Data := ex1Rs1Data
+    ex1PkgOut.rs2Data := ex1Rs2Data
+    ex1PkgOut.shallowRs1Sel := io.forward.shallowRs1Sel
+    ex1PkgOut.shallowRs2Sel := io.forward.shallowRs2Sel
+    ex1PkgOut.lateRs1Sel := io.forward.lateRs1Sel
+    ex1PkgOut.lateRs2Sel := io.forward.lateRs2Sel
+    ex1PkgOut.needsEX2Replay := io.forward.needsEX2Replay
     
     // ========== EX2阶段 ==========
     val ex2Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
     when(io.hazard.ex2Flush) {
         ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
+    }.elsewhen(io.hazard.ex2Stall && !io.hazard.ex3Stall) {
+        ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex2Stall) {
         ex2Pkg := ex1PkgOut
     }
+
+    val aluEX2 = Module(new ALU)
+    aluEX2.io.src1 := Mux(
+        ex2Pkg.src1Sel === 0.U,
+        io.forward.replayRs1Data,
+        ex2Pkg.pc
+    )
+    aluEX2.io.src2 := Mux(
+        ex2Pkg.src2Sel === 0.U,
+        io.forward.replayRs2Data,
+        ex2Pkg.imm
+    )
+    aluEX2.io.op := ex2Pkg.op
     
     // ========== EX3阶段 ==========
+    // Capture the completed divider result with its instruction when EX2
+    // advances. A later FDIV may overwrite the unit output while EX3 stalls.
+    val ex2IsFDiv = ex2Pkg.op === ZirconConfig.EXEOp.FDIV_S ||
+                    ex2Pkg.op === ZirconConfig.EXEOp.FSQRT_S
+    val ex2PkgOut = WireDefault(ex2Pkg)
+    ex2PkgOut.rs1Data := io.forward.replayRs1Data
+    ex2PkgOut.rs2Data := io.forward.replayRs2Data
+    when(ex2Pkg.needsEX2Replay) {
+        ex2PkgOut.aluResult := aluEX2.io.res
+    }
+    when(ex2Pkg.rdValid && ex2IsFDiv) {
+        ex2PkgOut.fpuResult := fdiv.io.res
+        ex2PkgOut.fflags := fdiv.io.fflags
+    }
     val ex3Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
     when(io.hazard.ex3Flush) {
         ex3Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex3Stall) {
-        ex3Pkg := ex2Pkg
+        ex3Pkg := ex2PkgOut
     }
     
     // ========== WB阶段 ==========
     val wbPkg = RegInit(0.U.asTypeOf(new InstructionPackage))
     val ex3IsFDiv = ex3Pkg.op === ZirconConfig.EXEOp.FDIV_S ||
                     ex3Pkg.op === ZirconConfig.EXEOp.FSQRT_S
-    val ex3FpuRes = Mux(ex3IsFDiv, fdiv.io.res, fpu.io.res)
-    val ex3FpuFlags = Mux(ex3IsFDiv, fdiv.io.fflags, fpu.io.fflags)
+    val ex3FpuRes = Mux(ex3IsFDiv, ex3Pkg.fpuResult, fpu.io.res)
+    val ex3FpuFlags = Mux(ex3IsFDiv, ex3Pkg.fflags, fpu.io.fflags)
     when(io.hazard.wbFlush) {
         wbPkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.wbStall) {

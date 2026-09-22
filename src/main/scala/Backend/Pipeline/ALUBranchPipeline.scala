@@ -1,5 +1,6 @@
 import chisel3._
 import chisel3.util._
+import ZirconConfig.EXEOp._
 
 // Pipeline的基础接口
 class PipelineForwardIO extends Bundle {
@@ -11,6 +12,13 @@ class PipelineForwardIO extends Bundle {
     val fwdRs1Data = Input(UInt(32.W))
     val fwdRs2Data = Input(UInt(32.W))
     val fwdRs3Data = Input(UInt(32.W))
+    val shallowRs1Sel = Input(UInt(8.W))
+    val shallowRs2Sel = Input(UInt(8.W))
+    val lateRs1Sel = Input(UInt(8.W))
+    val lateRs2Sel = Input(UInt(8.W))
+    val needsEX2Replay = Input(Bool())
+    val replayRs1Data = Input(UInt(32.W))
+    val replayRs2Data = Input(UInt(32.W))
 }
 
 class PipelineBackendIO extends Bundle {
@@ -45,9 +53,11 @@ class PipelineHazardIO extends Bundle {
 
 // ALUBranchPipeline特有的IO
 class ALUBranchPipelineHazardIO extends PipelineHazardIO {
-    // 分支预测失败信号和跳转地址
-    val predFail   = Output(Bool())
-    val branchTgt  = Output(UInt(32.W))
+    // EX2普通分支以及EX3浅依赖分支的重定向信号
+    val predFailEX2   = Output(Bool())
+    val branchTgtEX2  = Output(UInt(32.W))
+    val predFailEX3   = Output(Bool())
+    val branchTgtEX3  = Output(UInt(32.W))
 }
 
 class ALUBranchPipelineIO extends Bundle {
@@ -86,20 +96,46 @@ class ALUBranchPipeline extends Module {
     branch.io.imm := ex1Pkg.imm
     
     // EX1阶段更新InstPkg
-    val ex1PkgOut = ex1Pkg.EX1Update(alu.io.res, branch.io.branchTgt, branch.io.predFail)
+    val ex1PkgOut = WireDefault(
+        ex1Pkg.EX1Update(alu.io.res, branch.io.branchTgt, branch.io.predFail)
+    )
+    ex1PkgOut.rs1Data := ex1Rs1Data
+    ex1PkgOut.rs2Data := ex1Rs2Data
+    ex1PkgOut.shallowRs1Sel := io.forward.shallowRs1Sel
+    ex1PkgOut.shallowRs2Sel := io.forward.shallowRs2Sel
+    ex1PkgOut.lateRs1Sel := io.forward.lateRs1Sel
+    ex1PkgOut.lateRs2Sel := io.forward.lateRs2Sel
+    ex1PkgOut.needsEX2Replay := io.forward.needsEX2Replay
     
     // ========== EX2阶段 ==========
     // EX1-EX2段间寄存器
     val ex2Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
     when(io.hazard.ex2Flush) {
         ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
+    }.elsewhen(io.hazard.ex2Stall && !io.hazard.ex3Stall) {
+        ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex2Stall) {
         ex2Pkg := ex1PkgOut
     }
     
-    // Branch结果在EX2阶段送出（为了时序打一拍）
-    io.hazard.predFail := ex2Pkg.predFail
-    io.hazard.branchTgt := ex2Pkg.branchTgt
+    // 浅依赖消费者在EX2使用前递数据重新执行ALU。
+    val aluEX2 = Module(new ALU)
+    val ex2Rs1Data = io.forward.replayRs1Data
+    val ex2Rs2Data = io.forward.replayRs2Data
+    aluEX2.io.src1 := Mux(ex2Pkg.src1Sel === 0.U, ex2Rs1Data, ex2Pkg.pc)
+    aluEX2.io.src2 := Mux(ex2Pkg.src2Sel === 0.U, ex2Rs2Data, ex2Pkg.imm)
+    aluEX2.io.op := ex2Pkg.op
+
+    val ex2PkgOut = WireDefault(ex2Pkg)
+    ex2PkgOut.rs1Data := ex2Rs1Data
+    ex2PkgOut.rs2Data := ex2Rs2Data
+    when(ex2Pkg.needsEX2Replay) {
+        ex2PkgOut.aluResult := aluEX2.io.res
+    }
+
+    // EX1结果无效的分支必须延迟到EX3重定向。
+    io.hazard.predFailEX2 := ex2Pkg.predFail && !ex2Pkg.needsEX2Replay
+    io.hazard.branchTgtEX2 := ex2Pkg.branchTgt
     
     // ========== EX3阶段 ==========
     // EX2-EX3段间寄存器
@@ -107,8 +143,25 @@ class ALUBranchPipeline extends Module {
     when(io.hazard.ex3Flush) {
         ex3Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex3Stall) {
-        ex3Pkg := ex2Pkg
+        ex3Pkg := ex2PkgOut
     }
+
+    // 浅依赖条件分支/JALR在EX3使用修正后的源操作数重新判断。
+    val branchEX3 = Module(new Branch)
+    branchEX3.io.src1 := ex3Pkg.rs1Data
+    branchEX3.io.src2 := ex3Pkg.rs2Data
+    branchEX3.io.op := ex3Pkg.op
+    branchEX3.io.pc := ex3Pkg.pc
+    branchEX3.io.imm := ex3Pkg.imm
+
+    val isConditionalBranch = ex3Pkg.op === BEQ || ex3Pkg.op === BNE ||
+        ex3Pkg.op === BLT || ex3Pkg.op === BGE ||
+        ex3Pkg.op === BLTU || ex3Pkg.op === BGEU
+    val isJALR = ex3Pkg.op === JALR
+    val ex3ShallowBranchValid = ex3Pkg.needsEX2Replay &&
+        (isConditionalBranch || isJALR)
+    io.hazard.predFailEX3 := ex3ShallowBranchValid && branchEX3.io.predFail
+    io.hazard.branchTgtEX3 := branchEX3.io.branchTgt
     
     // ========== WB阶段 ==========
     // EX3-WB段间寄存器
@@ -139,4 +192,3 @@ class ALUBranchPipeline extends Module {
     io.hazard.ex1Pkg := ex1Pkg
     io.hazard.ex2Pkg := ex2Pkg
 }
-

@@ -25,9 +25,11 @@ class Regfile(nr: Int, nw: Int) extends Module {
             forwardMatch(j) := io.wen(j) && (io.waddr(j) === io.raddr(i))
         }
         
-        // 写优先：如果有写端口匹配，使用写数据；否则使用寄存器堆数据
+        // 写优先：如果有写端口匹配，使用写数据；否则使用寄存器堆数据。
+        // 同周期多端口写同一寄存器时，高编号端口对应包内更高槽位，
+        // 必须与寄存器最终写入优先级一致，返回高编号端口的数据。
         io.rdata(i) := MuxCase(regfile(io.raddr(i)), 
-            (0 until nw).map(j => (forwardMatch(j), io.wdata(j)))
+            (nw - 1 to 0 by -1).map(j => (forwardMatch(j), io.wdata(j)))
         )
     }
     

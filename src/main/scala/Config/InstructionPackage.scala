@@ -22,8 +22,16 @@ class InstructionPackage extends Bundle {
     val imm       = UInt(32.W)
     val src1Sel   = UInt(1.W) // 0: rs1; 1: pc; 
     val src2Sel   = UInt(1.W) // 0: rs2; 1: imm;
+    val shallowDepOK = Bool() // eligible for same-packet shallow dependency
+    val rs1ReadValid = Bool() // instruction semantically reads rs1
+    val rs2ReadValid = Bool() // instruction semantically reads rs2
     /* EX Stage */
     val aluResult = UInt(32.W)
+    val shallowRs1Sel = UInt(8.W) // same-packet producer selected for rs1
+    val shallowRs2Sel = UInt(8.W) // same-packet producer selected for rs2
+    val lateRs1Sel = UInt(8.W)    // previous packet's replayed producer for rs1
+    val lateRs2Sel = UInt(8.W)    // previous packet's replayed producer for rs2
+    val needsEX2Replay = Bool()   // EX1 ALU result must be recomputed in EX2
     val fpuResult = UInt(32.W)
     val fflags    = UInt(5.W) // floating-point status flags (NV, DZ, OF, UF, NX)
     val branchTgt = UInt(32.W)
@@ -38,7 +46,7 @@ class InstructionPackage extends Bundle {
         instPkg.inst   := inst
         instPkg
     }
-    def IDUpdate(rs1: UInt, rs2: UInt, rs3: UInt, rd: UInt, rdValid: Bool, op: UInt, rm: UInt, imm: UInt, src1Sel: UInt, src2Sel: UInt): InstructionPackage = {
+    def IDUpdate(rs1: UInt, rs2: UInt, rs3: UInt, rd: UInt, rdValid: Bool, op: UInt, rm: UInt, imm: UInt, src1Sel: UInt, src2Sel: UInt, shallowDepOK: Bool, rs1ReadValid: Bool, rs2ReadValid: Bool): InstructionPackage = {
         val instPkg = WireDefault(this)
         instPkg.rs1       := rs1
         instPkg.rs2       := rs2
@@ -50,6 +58,14 @@ class InstructionPackage extends Bundle {
         instPkg.imm       := imm
         instPkg.src1Sel   := src1Sel
         instPkg.src2Sel   := src2Sel
+        instPkg.shallowDepOK := shallowDepOK
+        instPkg.rs1ReadValid := rs1ReadValid
+        instPkg.rs2ReadValid := rs2ReadValid
+        instPkg.shallowRs1Sel := 0.U
+        instPkg.shallowRs2Sel := 0.U
+        instPkg.lateRs1Sel := 0.U
+        instPkg.lateRs2Sel := 0.U
+        instPkg.needsEX2Replay := false.B
         instPkg
     }
     def IDUpdate(rs1Data: UInt, rs2Data: UInt, rs3Data: UInt): InstructionPackage = {

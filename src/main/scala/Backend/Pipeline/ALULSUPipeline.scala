@@ -6,7 +6,7 @@ class ALULSUPipelineIO extends Bundle {
     val backend = new PipelineBackendIO
     val frontend = new PipelineFrontendIO
     val hazard = new PipelineHazardIO
-    val mem = new LSUMemIO  // LSU的内存接口
+    val lsu = new PipelineLSUIO
 }
 
 class ALULSUPipeline extends Module {
@@ -30,27 +30,57 @@ class ALULSUPipeline extends Module {
     
     // EX1阶段更新InstPkg（包含ALU结果和前递后的rs2Data供EX2阶段store使用）
     val ex1PkgOut = WireDefault(ex1Pkg.EX1Update(alu.io.res, 0.U, false.B))
+    ex1PkgOut.rs1Data := ex1Rs1Data
     ex1PkgOut.rs2Data := ex1Rs2Data  // 保存前递后的rs2数据，供EX2阶段store使用
+    ex1PkgOut.shallowRs1Sel := io.forward.shallowRs1Sel
+    ex1PkgOut.shallowRs2Sel := io.forward.shallowRs2Sel
+    ex1PkgOut.lateRs1Sel := io.forward.lateRs1Sel
+    ex1PkgOut.lateRs2Sel := io.forward.lateRs2Sel
+    ex1PkgOut.needsEX2Replay := io.forward.needsEX2Replay
     
     // ========== EX2阶段 ==========
     val ex2Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
     when(io.hazard.ex2Flush) {
         ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
+    }.elsewhen(io.hazard.ex2Stall && !io.hazard.ex3Stall) {
+        ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex2Stall) {
         ex2Pkg := ex1PkgOut
     }
+
+    val aluEX2 = Module(new ALU)
+    aluEX2.io.src1 := Mux(
+        ex2Pkg.src1Sel === 0.U,
+        io.forward.replayRs1Data,
+        ex2Pkg.pc
+    )
+    aluEX2.io.src2 := Mux(
+        ex2Pkg.src2Sel === 0.U,
+        io.forward.replayRs2Data,
+        ex2Pkg.imm
+    )
+    aluEX2.io.op := ex2Pkg.op
+
+    val ex2PkgWithAlu = WireDefault(ex2Pkg)
+    ex2PkgWithAlu.rs1Data := io.forward.replayRs1Data
+    ex2PkgWithAlu.rs2Data := io.forward.replayRs2Data
+    when(ex2Pkg.needsEX2Replay) {
+        ex2PkgWithAlu.aluResult := aluEX2.io.res
+    }
     
-    // LSU实例化（在EX2阶段发起访问）
+    // LSU在EX2生成Load请求或Store Buffer入队请求。Store不再直接写内存。
     val lsu = Module(new LSU)
+    lsu.io.valid := ex2Pkg.inst =/= 0.U
     lsu.io.op := ex2Pkg.op
-    lsu.io.addr := ex2Pkg.aluResult  // 使用EX1-EX2寄存器中的ALU结果作为地址
-    lsu.io.wdata := ex2Pkg.rs2Data   // store数据使用EX1阶段前递修正后保存的rs2Data
-    
-    // 连接LSU的内存接口
-    io.mem <> lsu.io.mem
+    lsu.io.addr := ex2PkgWithAlu.aluResult
+    lsu.io.wdata := ex2PkgWithAlu.rs2Data
+    lsu.io.pc := ex2Pkg.pc
+    lsu.io.inst := ex2Pkg.inst
+
+    io.lsu <> lsu.io.pipeline
     
     // EX2阶段更新memResult
-    val ex2PkgOut = ex2Pkg.EX2Update(lsu.io.res)
+    val ex2PkgOut = ex2PkgWithAlu.EX2Update(lsu.io.res)
     
     // ========== EX3阶段 ==========
     val ex3Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
@@ -91,4 +121,3 @@ class ALULSUPipeline extends Module {
     io.hazard.ex1Pkg := ex1Pkg
     io.hazard.ex2Pkg := ex2Pkg
 }
-

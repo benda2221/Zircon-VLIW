@@ -8,7 +8,9 @@ class ALUFPUPipelineIO extends Bundle {
     val hazard = new PipelineHazardIO
 }
 
-class ALUFPUPipeline extends Module {
+class ALUFPUPipeline(
+    val enableShallowEX2: Boolean = false
+) extends Module {
     val io = IO(new ALUFPUPipelineIO)
     
     // ========== EX1阶段 ==========
@@ -36,19 +38,48 @@ class ALUFPUPipeline extends Module {
     fpu.io.op := ex1Pkg.op
     fpu.io.rm := ex1Pkg.rm
     fpu.io.control.s1Enable := !io.hazard.ex2Stall
-    fpu.io.control.s1Flush := io.hazard.ex2Flush
+    fpu.io.control.s1Flush := io.hazard.ex2Flush ||
+        (io.hazard.ex2Stall && !io.hazard.ex3Stall)
     fpu.io.control.s2Enable := !io.hazard.ex3Stall
     fpu.io.control.s2Flush := io.hazard.ex3Flush
     
     // EX1阶段更新InstPkg
-    val ex1PkgOut = ex1Pkg.EX1Update(alu.io.res, 0.U, false.B)
+    val ex1PkgOut = WireDefault(ex1Pkg.EX1Update(alu.io.res, 0.U, false.B))
+    ex1PkgOut.rs1Data := ex1Rs1Data
+    ex1PkgOut.rs2Data := ex1Rs2Data
+    ex1PkgOut.shallowRs1Sel := io.forward.shallowRs1Sel
+    ex1PkgOut.shallowRs2Sel := io.forward.shallowRs2Sel
+    ex1PkgOut.lateRs1Sel := io.forward.lateRs1Sel
+    ex1PkgOut.lateRs2Sel := io.forward.lateRs2Sel
+    ex1PkgOut.needsEX2Replay := io.forward.needsEX2Replay
     
     // ========== EX2阶段 ==========
     val ex2Pkg = RegInit(0.U.asTypeOf(new InstructionPackage))
     when(io.hazard.ex2Flush) {
         ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
+    }.elsewhen(io.hazard.ex2Stall && !io.hazard.ex3Stall) {
+        ex2Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex2Stall) {
         ex2Pkg := ex1PkgOut
+    }
+
+    val ex2PkgOut = WireDefault(ex2Pkg)
+    if (enableShallowEX2) {
+        val aluEX2 = Module(new ALU)
+        aluEX2.io.src1 := Mux(
+            ex2Pkg.src1Sel === 0.U,
+            io.forward.replayRs1Data,
+            ex2Pkg.pc
+        )
+        aluEX2.io.src2 := Mux(
+            ex2Pkg.src2Sel === 0.U,
+            io.forward.replayRs2Data,
+            ex2Pkg.imm
+        )
+        aluEX2.io.op := ex2Pkg.op
+        when(ex2Pkg.needsEX2Replay) {
+            ex2PkgOut.aluResult := aluEX2.io.res
+        }
     }
     
     // ========== EX3阶段 ==========
@@ -56,7 +87,7 @@ class ALUFPUPipeline extends Module {
     when(io.hazard.ex3Flush) {
         ex3Pkg := 0.U.asTypeOf(new InstructionPackage)
     }.elsewhen(!io.hazard.ex3Stall) {
-        ex3Pkg := ex2Pkg
+        ex3Pkg := ex2PkgOut
     }
     
     // ========== WB阶段 ==========

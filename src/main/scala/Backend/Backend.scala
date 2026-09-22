@@ -1,12 +1,6 @@
 import chisel3._
 import chisel3.util._
 
-// Backend内存接口（两个LSU的内存接口）
-class BackendMemIO extends Bundle {
-    val lsu0 = new LSUMemIO  // 流水线5的LSU
-    val lsu1 = new LSUMemIO  // 流水线6的LSU
-}
-
 // Backend与Frontend的接口
 class BackendFrontendIO extends Bundle {
     // 从Frontend接收8个InstPkg
@@ -29,6 +23,8 @@ class BackendFrontendIO extends Bundle {
 class BackendHazardIO extends Bundle {
     // 接收Hazard的控制信号（每个阶段）
     val ex1Flush = Input(Vec(8, Bool()))
+    val ex1RawFlush = Input(Vec(8, Bool()))    // insert an ID-EX1 bubble
+    val ex1BranchFlush = Input(Vec(8, Bool())) // cancel younger branch-path work
     val ex1Stall = Input(Vec(8, Bool()))
     val ex2Flush = Input(Vec(8, Bool()))
     val ex2Stall = Input(Vec(8, Bool()))
@@ -40,6 +36,11 @@ class BackendHazardIO extends Bundle {
     // 输出各Pipeline的EX1和EX2阶段InstPkg给Hazard做RAW判断
     val ex1Pkgs = Output(Vec(8, new InstructionPackage))
     val ex2Pkgs = Output(Vec(8, new InstructionPackage))
+    val ex1ShallowRs1Sel = Output(Vec(8, UInt(8.W)))
+    val ex1ShallowRs2Sel = Output(Vec(8, UInt(8.W)))
+    val ex1LateRs1Sel = Output(Vec(8, UInt(8.W)))
+    val ex1LateRs2Sel = Output(Vec(8, UInt(8.W)))
+    val ex1NeedsEX2Replay = Output(Vec(8, Bool()))
     
     // 流水线3、4的除法器busy信号
     val divBusy = Output(Vec(2, Bool()))
@@ -47,9 +48,11 @@ class BackendHazardIO extends Bundle {
     // 流水线0的浮点除法器busy信号
     val fdivBusy = Output(Bool())
     
-    // 流水线7的分支预测失败信号
-    val predFail = Output(Bool())
-    val branchTgt = Output(UInt(32.W))
+    // 流水线7的分阶段重定向信号
+    val predFailEX2 = Output(Bool())
+    val branchTgtEX2 = Output(UInt(32.W))
+    val predFailEX3 = Output(Bool())
+    val branchTgtEX3 = Output(UInt(32.W))
 }
 
 // Backend调试接口
@@ -74,18 +77,11 @@ class Backend extends Module {
     
     // ========== ID-EX1段间寄存器（集中管理）==========
     val idEx1Pkgs = RegInit(VecInit(Seq.fill(8)(0.U.asTypeOf(new InstructionPackage))))
-    for (i <- 0 until 8) {
-        when(io.hazard.ex1Flush(i)) {
-            idEx1Pkgs(i) := 0.U.asTypeOf(new InstructionPackage)
-        }.elsewhen(!io.hazard.ex1Stall(i)) {
-            idEx1Pkgs(i) := io.frontend.instPkgs(i)
-        }
-    }
     
     // ========== 实例化8条Pipeline ==========
     val pipeline0 = Module(new FDivFPUPipeline)          // FDiv + FPU
-    val pipeline1 = Module(new ALUFPUPipeline)           // ALU + FPU
-    val pipeline2 = Module(new ALUFPUPipeline)           // ALU + FPU
+    val pipeline1 = Module(new ALUFPUPipeline(enableShallowEX2 = true))  // ALU + FPU + replay EX2 ALU
+    val pipeline2 = Module(new ALUFPUPipeline(enableShallowEX2 = true))  // ALU + FPU + shallow EX2 ALU
     val pipeline3 = Module(new ALUiMDPipeline)     // ALU + iMulDiv
     val pipeline4 = Module(new ALUiMDPipeline)     // ALU + iMulDiv
     val pipeline5 = Module(new ALULSUPipeline)     // ALU + LSU
@@ -107,6 +103,23 @@ class Backend extends Module {
         pipe.asInstanceOf[{ def io: { def forward: { def fwdRs1Data: UInt; def fwdRs2Data: UInt; def fwdRs3Data: UInt }}}].io.forward.fwdRs1Data := forward.io.fwdRs1Data(idx)
         pipe.asInstanceOf[{ def io: { def forward: { def fwdRs1Data: UInt; def fwdRs2Data: UInt; def fwdRs3Data: UInt }}}].io.forward.fwdRs2Data := forward.io.fwdRs2Data(idx)
         pipe.asInstanceOf[{ def io: { def forward: { def fwdRs1Data: UInt; def fwdRs2Data: UInt; def fwdRs3Data: UInt }}}].io.forward.fwdRs3Data := forward.io.fwdRs3Data(idx)
+        val f = pipe.asInstanceOf[{
+            def io: {
+                def forward: {
+                    def shallowRs1Sel: UInt; def shallowRs2Sel: UInt
+                    def lateRs1Sel: UInt; def lateRs2Sel: UInt
+                    def needsEX2Replay: Bool
+                    def replayRs1Data: UInt; def replayRs2Data: UInt
+                }
+            }
+        }].io.forward
+        f.shallowRs1Sel := forward.io.shallowRs1Sel(idx)
+        f.shallowRs2Sel := forward.io.shallowRs2Sel(idx)
+        f.lateRs1Sel := forward.io.lateRs1Sel(idx)
+        f.lateRs2Sel := forward.io.lateRs2Sel(idx)
+        f.needsEX2Replay := forward.io.needsEX2Replay(idx)
+        f.replayRs1Data := forward.io.replayRs1Data(idx)
+        f.replayRs2Data := forward.io.replayRs2Data(idx)
     }
     
     def connectBackendToPipe(idx: Int, pipe: Module): Unit = {
@@ -147,10 +160,38 @@ class Backend extends Module {
         connectBackendToPipe(i, pipelines(i))
         connectHazardToPipe(i, pipelines(i))
     }
-    
-    // ========== 连接LSU的内存接口 ==========
-    io.mem.lsu0 <> pipeline5.io.mem
-    io.mem.lsu1 <> pipeline6.io.mem
+
+    // A nested replay holds the EX1 instruction for one cycle. Preserve any
+    // ordinary EX2/EX3/WB forwarding observed in that first cycle, because the
+    // producing WB entry may be gone when the held instruction is released.
+    for (i <- 0 until 8) {
+        when(io.hazard.ex1Flush(i)) {
+            idEx1Pkgs(i) := 0.U.asTypeOf(new InstructionPackage)
+        }.elsewhen(io.hazard.ex1Stall(i)) {
+            idEx1Pkgs(i).rs1Data := forward.io.fwdRs1Data(i)
+            idEx1Pkgs(i).rs2Data := forward.io.fwdRs2Data(i)
+            idEx1Pkgs(i).rs3Data := forward.io.fwdRs3Data(i)
+        }.otherwise {
+            idEx1Pkgs(i) := io.frontend.instPkgs(i)
+        }
+    }
+
+    io.hazard.ex1ShallowRs1Sel := forward.io.shallowRs1Sel
+    io.hazard.ex1ShallowRs2Sel := forward.io.shallowRs2Sel
+    io.hazard.ex1LateRs1Sel := forward.io.lateRs1Sel
+    io.hazard.ex1LateRs2Sel := forward.io.lateRs2Sel
+    io.hazard.ex1NeedsEX2Replay := forward.io.needsEX2Replay
+    pipeline0.io.hazard.branchFlush := io.hazard.ex1BranchFlush(0)
+
+    // ========== 连接LSU、Store Buffer与内存接口 ==========
+    val memoryOrder = Module(new LSUMemoryOrder)
+    memoryOrder.io.pipeline(0) <> pipeline5.io.lsu
+    memoryOrder.io.pipeline(1) <> pipeline6.io.lsu
+    memoryOrder.io.ex3Flush(0) := io.hazard.ex3Flush(5)
+    memoryOrder.io.ex3Flush(1) := io.hazard.ex3Flush(6)
+    memoryOrder.io.ex3Stall(0) := io.hazard.ex3Stall(5)
+    memoryOrder.io.ex3Stall(1) := io.hazard.ex3Stall(6)
+    io.mem <> memoryOrder.io.mem
     
     // ========== 连接divBusy信号 ==========
     io.hazard.divBusy(0) := pipeline3.io.hazard.divBusy
@@ -160,10 +201,18 @@ class Backend extends Module {
     io.hazard.fdivBusy := pipeline0.io.hazard.fdivBusy
     
     // ========== 连接分支预测失败信号 ==========
-    io.hazard.predFail := pipeline7.io.hazard.predFail
-    io.hazard.branchTgt := pipeline7.io.hazard.branchTgt
-    io.frontend.predFail := pipeline7.io.hazard.predFail
-    io.frontend.branchTgt := pipeline7.io.hazard.branchTgt
+    io.hazard.predFailEX2 := pipeline7.io.hazard.predFailEX2
+    io.hazard.branchTgtEX2 := pipeline7.io.hazard.branchTgtEX2
+    io.hazard.predFailEX3 := pipeline7.io.hazard.predFailEX3
+    io.hazard.branchTgtEX3 := pipeline7.io.hazard.branchTgtEX3
+
+    io.frontend.predFail := pipeline7.io.hazard.predFailEX3 ||
+        pipeline7.io.hazard.predFailEX2
+    io.frontend.branchTgt := Mux(
+        pipeline7.io.hazard.predFailEX3,
+        pipeline7.io.hazard.branchTgtEX3,
+        pipeline7.io.hazard.branchTgtEX2
+    )
     
     // ========== 汇总写回信号到Frontend（使用循环）==========
     // GPR写口分配：流水线0-7各1个，共8个
