@@ -1,4 +1,4 @@
 [submodule "ZirconSim"]
 	path = ZirconSim
-	url = https://github.com/MAdrid1011/ZirconSim.git
-	branch = VLIW
+	url = https://github.com/benda2221/VLIW-Sim.git
+	branch = shallow-dependency
